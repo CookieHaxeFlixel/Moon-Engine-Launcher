@@ -14,16 +14,11 @@
 
 namespace fs = std::filesystem;
 
-// ======= CONSTANTES =======
 const unsigned int WIN_W = 1280;
 const unsigned int WIN_H = 720;
 const float SIDEBAR_W    = 185.f;
 const float BOTTOMBAR_H  = 120.f;
 
-// ======= CAMINHOS (baseados na pasta do .exe, não no diretório atual) =======
-// Isso evita que o launcher perca o login/salvamento quando é aberto
-// de um jeito diferente (duplo clique vs terminal vs atalho), pois antes
-// os caminhos eram relativos ao diretório de trabalho (cwd), que pode mudar.
 std::string exeDir() {
     static std::string dir = [](){
         char buffer[MAX_PATH];
@@ -52,7 +47,6 @@ const std::string A_NEWS    = A_UI + "news\\docs\\";
 const std::string A_FONTS   = A_UI + "fonts\\";
 const std::string A_ICON    = "assets\\app\\icons\\icon-moon.png";
 
-// ======= STRUCTS =======
 struct ProgressData { double downloaded=0, total=0, speed=0; };
 ProgressData progressData;
 
@@ -68,7 +62,6 @@ struct UserData {
 };
 UserData currentUser;
 
-// ======= CURL =======
 size_t writeFileCb(void* p, size_t s, size_t n, FILE* f) { return fwrite(p,s,n,f); }
 size_t writeStrCb(void* p, size_t s, size_t n, std::string* str) {
     str->append((char*)p,s*n); return s*n;
@@ -111,12 +104,10 @@ std::string jStr(const std::string& json, const std::string& key) {
     return out;
 }
 
-// ======= SAVES =======
 void salvarUser() {
     fs::create_directories(SAVES_PATH_());
     std::ofstream f(SAVE_FILE_());
     if(!f.is_open()){
-        // Se não abriu, avisa no console (útil pra debugar em terminal)
         printf("[ERRO] Nao foi possivel escrever em: %s\n", SAVE_FILE_().c_str());
         return;
     }
@@ -141,7 +132,6 @@ bool carregarUser() {
     return currentUser.logado;
 }
 
-// ======= VERSOES =======
 std::vector<Version> carregarVersions() {
     std::vector<Version> vers;
     std::ifstream f(VERSIONS_JSON);
@@ -161,10 +151,9 @@ std::vector<Version> carregarVersions() {
     return vers;
 }
 
-// ======= INSTALLED.JSON (versões instaladas localmente) =======
 struct InstalledEntry {
     std::string version;
-    std::string path;      // caminho relativo à pasta do .exe do launcher
+    std::string path;    
     bool installed = false;
 };
 
@@ -179,7 +168,6 @@ bool jBool(const std::string& json, const std::string& key) {
     return json.compare(p, 4, "true") == 0;
 }
 
-// Lê um array de objetos: [{ "version":"...", "installed":true, "path":"..." }, ...]
 std::vector<InstalledEntry> carregarInstalled() {
     std::vector<InstalledEntry> out;
     std::string path = INSTALLED_FILE_();
@@ -207,8 +195,6 @@ std::vector<InstalledEntry> carregarInstalled() {
     return out;
 }
 
-// Resolve o .exe de uma versão usando o installed.json; se não achar (ou não
-// estiver marcada como instalada), cai no caminho antigo baseado em VERSIONS_PATH_().
 std::string resolveExePath(const std::vector<InstalledEntry>& installed, const std::string& numero) {
     for (auto& e : installed) {
         if (e.version == numero && e.installed) {
@@ -219,7 +205,6 @@ std::string resolveExePath(const std::vector<InstalledEntry>& installed, const s
     return VERSIONS_PATH_() + numero + "\\" + GAME_EXE_NAME;
 }
 
-// ======= HELPERS =======
 std::string fmtBytes(double b) {
     std::ostringstream ss;
     if(b>=1024*1024) ss<<std::fixed<<std::setprecision(1)<<b/1024/1024<<" MB";
@@ -228,7 +213,6 @@ std::string fmtBytes(double b) {
     return ss.str();
 }
 
-// ======= DRAW =======
 sf::VertexArray roundRect(float x,float y,float w,float h,float r,sf::Color col){
     sf::VertexArray s(sf::PrimitiveType::TriangleFan);
     int n=20;
@@ -246,34 +230,23 @@ sf::VertexArray roundRect(float x,float y,float w,float h,float r,sf::Color col)
     return s;
 }
 
-// Foto redonda usando RenderTexture com máscara circular
 sf::Texture makeCircleTexture(sf::Texture& src, unsigned int size) {
     sf::RenderTexture rt;
     rt.resize({size,size});
     rt.clear(sf::Color::Transparent);
 
-    // Círculo de máscara
     sf::CircleShape mask((float)size/2);
     mask.setPosition({0,0});
 
-    // Sprite da textura original escalado
     sf::Sprite spr(src);
     auto srcSz = src.getSize();
     float scale = (float)size / std::min((float)srcSz.x,(float)srcSz.y);
     spr.setScale({scale,scale});
-    // Centralizar
     spr.setPosition({((float)size - srcSz.x*scale)/2.f, ((float)size - srcSz.y*scale)/2.f});
 
-    // Usar stencil via sf::BlendMode não é direto no SFML 3
-    // Solução: desenhar círculo branco, depois sprite com multiply
-    // Alternativa simples: desenhar sprite dentro do círculo usando sf::View recortada
-
-    // Desenhar sprite diretamente (sem clipar) e depois overlay do círculo vazado
-    // Para SFML 3 a forma mais simples é usar um CircleShape com texture
     sf::CircleShape circle((float)size/2);
     circle.setPosition({0,0});
     circle.setTexture(&src);
-    // Mapear a textura para o círculo
     circle.setTextureRect(sf::IntRect({0,0},{(int)srcSz.x,(int)srcSz.y}));
 
     rt.draw(circle);
@@ -281,7 +254,6 @@ sf::Texture makeCircleTexture(sf::Texture& src, unsigned int size) {
     return rt.getTexture();
 }
 
-// ======= TELA LOADING =======
 void telaLoading(sf::RenderWindow& window, sf::Font& fontTitle) {
     sf::Texture bgTex, moonTex;
     bool hasBg   = bgTex.loadFromFile(A_LOADING+"loadingBackCard.png");
@@ -318,7 +290,6 @@ void telaLoading(sf::RenderWindow& window, sf::Font& fontTitle) {
         window.clear(sf::Color(10,15,40));
         if(hasBg) window.draw(bg);
         else {
-            // Card preto centralizado
             window.draw(roundRect(WIN_W/2.f-280,WIN_H/2.f-220,560,440,14,sf::Color(0,0,0,230)));
         }
         window.draw(t);
@@ -327,8 +298,6 @@ void telaLoading(sf::RenderWindow& window, sf::Font& fontTitle) {
         if(clk.getElapsedTime().asSeconds()+dt>=dur) break;
     }
 }
-
-// ======= TELA LOGIN =======
 bool telaLogin(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText) {
     sf::Texture bgTex, btnTex;
     bool hasBg  = bgTex.loadFromFile(A_LOGIN+"loginBackCard.png");
@@ -361,7 +330,6 @@ bool telaLogin(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText
         while(const std::optional ev=window.pollEvent()){
             if(ev->is<sf::Event::Closed>()){window.close();return false;}
             if(ev->is<sf::Event::MouseButtonPressed>()&&hBtn){
-                // Placeholder OAuth - simula login
                 currentUser.nome="Convidado-Guloso";
                 currentUser.apelido="convidado_guloso";
                 currentUser.id="000000000000";
@@ -394,7 +362,6 @@ bool telaLogin(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText
     return false;
 }
 
-// ======= TELA PROGRESSO (download) =======
 void telaProgresso(sf::RenderWindow& w, sf::Font& fontTitle, sf::Font& fontText,
                    bool& baixando, bool& extraindo, bool& concluido, const std::string& titulo) {
     while(w.isOpen()&&!concluido){
@@ -426,7 +393,6 @@ void telaProgresso(sf::RenderWindow& w, sf::Font& fontTitle, sf::Font& fontText,
     }
 }
 
-// ======= DOWNLOAD VERSAO =======
 void baixarVersao(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText, const Version& ver) {
     progressData={};
     bool baixando=true, extraindo=false, concluido=false;
@@ -469,14 +435,12 @@ void baixarVersao(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontT
     t.join();
 }
 
-// ======= TELA MODS =======
 void telaMods(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText) {
     auto vers = carregarVersions();
     auto installed = carregarInstalled();
-    int verSel = 0; // índice selecionado
+    int verSel = 0; 
     float winW=(float)WIN_W, winH=(float)WIN_H;
 
-    // Layout: lista versões à esquerda, área mods à direita
     float listX=SIDEBAR_W+20, listY=60, listW=280, listH=winH-BOTTOMBAR_H-80;
     float modsX=listX+listW+20, modsY=listY, modsW=winW-modsX-20, modsH=listH;
     float btnPlayX=winW/2-100, btnPlayY=winH-BOTTOMBAR_H+25, btnPlayW=200, btnPlayH=60;
@@ -492,14 +456,12 @@ void telaMods(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText)
             if(ev->is<sf::Event::MouseButtonPressed>()){
                 if(hVoltar) return;
 
-                // Clique na lista de versões
                 for(int i=0;i<(int)vers.size();i++){
                     float iy=listY+i*52;
                     if(mouse.x>=listX&&mouse.x<=listX+listW&&mouse.y>=iy&&mouse.y<=iy+46)
                         verSel=i;
                 }
 
-                // Botão play - abre a versão selecionada
                 if(hPlay&&!vers.empty()){
                     std::string exePath=resolveExePath(installed, vers[verSel].numero);
                     if(fs::exists(exePath)){
@@ -507,7 +469,6 @@ void telaMods(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText)
                         system(("\""+exePath+"\"").c_str());
                         window.setVisible(true);
                     } else {
-                        // Versão não instalada, baixar
                         baixarVersao(window,fontTitle,fontText,vers[verSel]);
                     }
                 }
@@ -516,18 +477,14 @@ void telaMods(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText)
 
         window.clear(sf::Color(10,15,40));
 
-        // Barra de baixo
         window.draw(roundRect(0,winH-BOTTOMBAR_H,winW,BOTTOMBAR_H,0,sf::Color(0,0,0,220)));
 
-        // Botão voltar
         window.draw(roundRect(btnVoltarX,btnVoltarY,btnVoltarW,btnVoltarH,6,hVoltar?sf::Color(60,60,80):sf::Color(40,40,60)));
         sf::Text vt(fontText,"Back",18); vt.setFillColor(sf::Color::White); vt.setPosition({btnVoltarX+10,btnVoltarY+7}); window.draw(vt);
 
-        // Título
         sf::Text titulo(fontTitle,"Mods",34); titulo.setFillColor(sf::Color::White);
         titulo.setPosition({SIDEBAR_W+140,15}); window.draw(titulo);
 
-        // Lista de versões
         window.draw(roundRect(listX-4,listY-4,listW+8,listH+8,8,sf::Color(20,20,40)));
         sf::Text ltitle(fontText,"",18); ltitle.setFillColor(sf::Color(150,150,200));
         ltitle.setPosition({listX+8,listY-30}); window.draw(ltitle);
@@ -539,7 +496,6 @@ void telaMods(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText)
             sf::Color cardCol = sel?sf::Color(60,80,160): hov?sf::Color(40,40,70):sf::Color(25,25,50);
             window.draw(roundRect(listX,iy,listW,46,6,cardCol));
 
-            // Badge do estado
             sf::Color badgeCol = vers[i].estado=="final"?sf::Color(40,160,80):
                                  vers[i].estado=="pre_release"?sf::Color(200,140,0):sf::Color(100,60,180);
             std::string badgeStr = vers[i].estado=="final"?"Final":
@@ -549,11 +505,9 @@ void telaMods(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText)
             sf::FloatRect bb=badge.getLocalBounds();
             badge.setPosition({listX+listW-120+(110-bb.size.x)/2,iy+13}); window.draw(badge);
 
-            // Número da versão
             sf::Text vnum(fontTitle,vers[i].numero,18); vnum.setFillColor(sf::Color::White);
             vnum.setPosition({listX+10,iy+6}); window.draw(vnum);
 
-            // Verificar se instalada (installed.json primeiro, depois fallback)
             std::string exePath=resolveExePath(installed, vers[i].numero);
             bool inst=fs::exists(exePath);
             sf::Text instTxt(fontText,inst?"Install":"Not install",13);
@@ -566,13 +520,11 @@ void telaMods(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText)
             empty.setPosition({listX+10,listY+20}); window.draw(empty);
         }
 
-        // Área de mods (placeholder por enquanto)
         window.draw(roundRect(modsX-4,modsY-4,modsW+8,modsH+8,8,sf::Color(20,20,40)));
         sf::Text mPlaceholder(fontText,"Mods soon...",20);
         mPlaceholder.setFillColor(sf::Color(100,100,140));
         mPlaceholder.setPosition({modsX+20,modsY+modsH/2}); window.draw(mPlaceholder);
 
-        // Botão PLAY
         if(!vers.empty()){
             std::string exePath=resolveExePath(installed, vers[verSel].numero);
             bool inst=fs::exists(exePath);
@@ -589,7 +541,6 @@ void telaMods(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText)
     }
 }
 
-// ======= TELA CHANGELOG =======
 void telaChangelog(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText) {
     std::string conteudo="";
     std::ifstream f(A_NEWS+"changelog.md");
@@ -641,11 +592,9 @@ void telaChangelog(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& font
     }
 }
 
-// ======= TELA OPCOES =======
 void telaOpcoes(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText, sf::Texture& avatarTex, bool hasAvatar) {
     float winW=(float)WIN_W, winH=(float)WIN_H;
 
-    // Avatar circular grande
     sf::Texture circTex;
     bool hasCirc=false;
     if(hasAvatar){
@@ -677,7 +626,6 @@ void telaOpcoes(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontTex
         sf::Text titulo(fontTitle,"Config's",34); titulo.setFillColor(sf::Color::White);
         titulo.setPosition({SIDEBAR_W+20,15}); window.draw(titulo);
 
-        // Avatar
         if(hasCirc){
             avatarSpr.setPosition({avatarX,avatarY});
             window.draw(avatarSpr);
@@ -685,7 +633,6 @@ void telaOpcoes(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontTex
             window.draw(roundRect(avatarX,avatarY,120,120,60,sf::Color(60,60,80)));
         }
 
-        // Info usuário
         sf::Text nome(fontTitle,currentUser.nome,30); nome.setFillColor(sf::Color::White);
         nome.setPosition({avatarX+140,avatarY+10}); window.draw(nome);
         sf::Text apelido(fontText,"@"+currentUser.apelido,22); apelido.setFillColor(sf::Color(160,160,180));
@@ -693,7 +640,6 @@ void telaOpcoes(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontTex
         sf::Text id(fontText,"ID: "+currentUser.id,18); id.setFillColor(sf::Color(100,100,120));
         id.setPosition({avatarX+140,avatarY+82}); window.draw(id);
 
-        // Botão sair
         window.draw(roundRect(btnSairX,btnSairY,btnSairW,btnSairH,8,hSair?sf::Color(200,40,40):sf::Color(150,30,30)));
         sf::Text sair(fontTitle,"Exit to Account",22); sair.setFillColor(sf::Color::White);
         sf::FloatRect sb=sair.getLocalBounds();
@@ -706,36 +652,26 @@ void telaOpcoes(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontTex
     }
 }
 
-// ======= HOME =======
 void telaHome(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText, sf::Font& fontMono) {
     float winW=(float)WIN_W, winH=(float)WIN_H;
 
-    // Layout baseado no concept:
-    // Sidebar: 185px largura, altura total MENOS a barra de baixo
-    // Barra baixo: 120px altura, começa em x=0, vai até winW (em cima da sidebar visualmente)
-    // Ícones: 130px, centralizados na sidebar
-    // Avatar: dentro da barra de baixo, canto esquerdo
-    // PLAY: centralizado na barra de baixo, após a sidebar
+    const float SB_W   = 185.f;  
+    const float BT_H   = 120.f;  
+    const float SB_H   = winH - BT_H; 
+    const float ICON_S = 110.f;  
+    const float OPT_S  = 110.f; 
+    const float ICON_X = SB_W/2.f - ICON_S/2.f;
 
-    const float SB_W   = 185.f;  // sidebar largura
-    const float BT_H   = 120.f;  // bottom bar altura
-    const float SB_H   = winH - BT_H; // sidebar altura (não cobre a bottom bar)
-    const float ICON_S = 110.f;  // tamanho dos ícones principais (mods/site/news)
-    const float OPT_S  = 110.f;  // tamanho do ícone de opções (pontinhos), igual aos outros
-    const float ICON_X = SB_W/2.f - ICON_S/2.f; // x centralizado na sidebar
-
-    // Posições Y dos ícones — colados perto do topo, como no concept
     float iconY1 = 20.f;
     float iconY2 = 150.f;
     float iconY3 = 280.f;
-    float iconY4 = 410.f; // pontinhos (opções), logo abaixo do 3º ícone
+    float iconY4 = 410.f; 
 
-    // Avatar: dentro da barra de baixo, lado esquerdo da sidebar
+
     float AVT_S  = 80.f;
     float AVT_X  = SB_W/2.f - AVT_S/2.f;
-    float AVT_Y  = winH - BT_H + 8.f; // só posição, mais pra cima dentro da barra de baixo
+    float AVT_Y  = winH - BT_H + 8.f; 
 
-    // Carregar texturas
     sf::Texture bgTex, playTex, leftBarTex, downBarTex;
     sf::Texture modTex, webTex, newsTex, optTex;
     sf::Texture avatarTex, fallbackTex;
@@ -770,7 +706,7 @@ void telaHome(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText,
     bool hasCirc=false;
     if(hasUser){ circTex=makeCircleTexture(userTex,(unsigned int)AVT_S); hasCirc=true; }
 
-    // ---- Sprites ----
+
     sf::Sprite bgSpr(bgTex);
     sf::Sprite leftSpr(leftBarTex);
     sf::Sprite downSpr(downBarTex);
@@ -779,40 +715,35 @@ void telaHome(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText,
     sf::Sprite avatarSpr(hasCirc ? circTex : userTex);
     sf::Sprite blackBarsSpr(blackBarsTex);
 
-    // Background — preenche tudo
+
     if(hasBg){
         auto sz=bgTex.getSize();
         bgSpr.setScale({winW/(float)sz.x, winH/(float)sz.y});
         bgSpr.setPosition({0,0});
     }
 
-    // Sidebar — x=0, y=0, w=SB_W, h=SB_H (não vai até a barra de baixo)
     if(hasLeft){
         auto sz=leftBarTex.getSize();
         leftSpr.setScale({SB_W/(float)sz.x, SB_H/(float)sz.y});
         leftSpr.setPosition({0,0});
     }
 
-    // Barra de baixo — x=0, y=winH-BT_H, w=winW, h=BT_H (cobre a sidebar embaixo)
     if(hasDown){
         auto sz=downBarTex.getSize();
         downSpr.setScale({winW/(float)sz.x, BT_H/(float)sz.y});
         downSpr.setPosition({0, winH-BT_H});
     }
 
-    // blackBars — mesma resolução da janela, encaixa na posição zero
     if(hasBlackBars){
         blackBarsSpr.setPosition({0,0});
     }
 
-    // Escalar ícone para um tamanho-alvo mantendo proporção
     auto scaleToSize=[&](sf::Sprite& spr, sf::Texture& tex, float targetSize){
         auto sz=tex.getSize();
         float sc=targetSize/std::max((float)sz.x,(float)sz.y);
         spr.setScale({sc,sc});
-        // Centralizar horizontalmente na sidebar
         float w=(float)sz.x*sc;
-        spr.setPosition({SB_W/2.f-w/2.f, 0}); // y será setado depois
+        spr.setPosition({SB_W/2.f-w/2.f, 0});
     };
 
     if(hasMod) { scaleToSize(modSpr, modTex, ICON_S);   modSpr.setPosition( {SB_W/2.f-modSpr.getGlobalBounds().size.x/2.f,  iconY1}); }
@@ -820,10 +751,8 @@ void telaHome(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText,
     if(hasNews){ scaleToSize(newsSpr,newsTex,ICON_S);   newsSpr.setPosition({SB_W/2.f-newsSpr.getGlobalBounds().size.x/2.f, iconY3}); }
     if(hasOpt) { scaleToSize(optSpr, optTex, OPT_S);    optSpr.setPosition( {SB_W/2.f-optSpr.getGlobalBounds().size.x/2.f,  iconY4}); }
 
-    // Avatar circular na barra de baixo
     avatarSpr.setPosition({AVT_X, AVT_Y});
 
-    // PLAY — centralizado na área após a sidebar, dentro da barra de baixo
     float playW=0,playH=0,playX=0,playY=0;
     if(hasPlay){
         auto sz=playTex.getSize();
@@ -832,7 +761,6 @@ void telaHome(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText,
         if((float)sz.x*sc>500.f) sc=500.f/(float)sz.x;
         playSpr.setScale({sc,sc});
         playW=(float)sz.x*sc; playH=(float)sz.y*sc;
-        // Centralizado na tela inteira (largura total da janela)
         playX=winW/2.f-playW/2.f;
         playY=winH-BT_H+(BT_H-playH)/2.f;
         playSpr.setPosition({playX,playY});
@@ -878,24 +806,18 @@ void telaHome(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText,
             }
         }
 
-        // ===== DESENHO =====
         window.clear(sf::Color(5,10,35));
 
-        // 1. Background
         if(hasBg) window.draw(bgSpr);
 
-        // 2. Sidebar (atrás dos ícones, não cobre a barra de baixo)
         if(hasLeft) window.draw(leftSpr);
         else window.draw(roundRect(0,0,SB_W,SB_H,0,sf::Color(0,0,0,220)));
 
-        // 3. Barra de baixo (cobre a parte de baixo da sidebar)
         if(hasDown) window.draw(downSpr);
         else window.draw(roundRect(0,winH-BT_H,winW,BT_H,0,sf::Color(0,0,0,220)));
 
-        // 3.5 blackBars — em cima das barras, debaixo dos ícones/opções
         if(hasBlackBars) window.draw(blackBarsSpr);
 
-        // 4. Ícones
         auto drawIcon=[&](sf::Sprite& spr, bool hov, bool has){
             if(!has) return;
             spr.setColor(hov?sf::Color(160,160,160):sf::Color::White);
@@ -906,18 +828,15 @@ void telaHome(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText,
         drawIcon(newsSpr,hNews,hasNews);
         drawIcon(optSpr, hOpt, hasOpt);
 
-        // 5. Avatar redondo na barra de baixo
         if(hasCirc) window.draw(avatarSpr);
         else if(hasUser) window.draw(avatarSpr);
 
-        // 6. Nome do usuário abaixo do avatar
         sf::Text nomeT(fontText,currentUser.nome,14);
         nomeT.setFillColor(sf::Color(200,200,200));
         sf::FloatRect nb=nomeT.getLocalBounds();
         nomeT.setPosition({SB_W/2.f-nb.size.x/2.f, AVT_Y+AVT_S+4});
         window.draw(nomeT);
 
-        // 7. PLAY
         if(hasPlay){
             playSpr.setColor(hPlay?sf::Color(180,180,180):sf::Color::White);
             window.draw(playSpr);
@@ -933,10 +852,8 @@ void telaHome(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText,
     }
 }
 
-// ======= MAIN =======
 int main(){
-    // Console de debug: mostra no terminal se o save.json foi lido/escrito e onde.
-    // Se preferir sem essa janelinha de console, pode remover as 2 linhas abaixo.
+
     AllocConsole();
     freopen("CONOUT$","w",stdout);
 
