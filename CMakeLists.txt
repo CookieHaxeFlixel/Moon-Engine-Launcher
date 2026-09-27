@@ -33,6 +33,9 @@ if(ANDROID)
     target_link_options(main PRIVATE "-u" "ANativeActivity_onCreate")
 else()
     add_executable(MoonLauncher main.cpp ${MINIZ_SOURCES})
+    if(WIN32)
+        target_sources(MoonLauncher PRIVATE app.rc)
+    endif()
     target_include_directories(MoonLauncher PRIVATE third_party/miniz)
     target_link_libraries(MoonLauncher PRIVATE
         SFML::Graphics

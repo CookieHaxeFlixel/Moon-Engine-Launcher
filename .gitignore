@@ -4,6 +4,7 @@ vscode-project.hxml
 build/
 build-android/
 vcpkg_installed/
+vcpkg_binary_cache/
 android/.gradle/
 android/local.properties
 android/app/build/
