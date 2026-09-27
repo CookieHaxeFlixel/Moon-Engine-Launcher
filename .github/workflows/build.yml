@@ -16,6 +16,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: ilammy/msvc-dev-cmd@v1
+
       - name: Clone vcpkg
         shell: cmd
         run: |
@@ -35,22 +37,22 @@ jobs:
         env:
           VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\vcpkg_binary_cache,readwrite
         run: |
-          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake
+          cmake -S . -B build -G Ninja -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
         shell: cmd
         env:
           VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\vcpkg_binary_cache,readwrite
         run: |
-          cmake --build build --config Release
+          cmake --build build
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: MoonLauncher-windows
           path: |
-            build/Release/MoonLauncher.exe
-            build/Release/*.dll
+            build/MoonLauncher.exe
+            build/*.dll
             versions.json
             assets/**
 
@@ -110,6 +112,7 @@ jobs:
           cp build-android/vcpkg_installed/arm64-android/lib/libsfml-graphics.so android/app/src/main/jniLibs/arm64-v8a/
           cp build-android/vcpkg_installed/arm64-android/lib/libsfml-window.so android/app/src/main/jniLibs/arm64-v8a/
           cp build-android/vcpkg_installed/arm64-android/lib/libsfml-system.so android/app/src/main/jniLibs/arm64-v8a/
+          cp "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" android/app/src/main/jniLibs/arm64-v8a/
           "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" android/app/src/main/jniLibs/arm64-v8a/libmain.so
 
       - name: Build APK
