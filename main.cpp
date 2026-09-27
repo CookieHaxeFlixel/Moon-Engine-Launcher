@@ -9,7 +9,7 @@
 #include <sstream>
 #include <iomanip>
 #include <vector>
-#include <atomic>
+#include <algorithm>
 #include <windows.h>
 
 namespace fs = std::filesystem;
@@ -35,6 +35,8 @@ std::string VERSIONS_PATH_() { return BASE_PATH_() + "versions\\"; }
 std::string SAVES_PATH_()    { return BASE_PATH_() + "data\\saves\\"; }
 std::string TEMP_PATH_()     { return BASE_PATH_() + "temp_extract\\"; }
 std::string SAVE_FILE_()     { return SAVES_PATH_() + "user.json"; }
+std::string MODS_PATH_()     { return BASE_PATH_() + "mods\\"; }
+std::string MODS_STATE_FILE_() { return SAVES_PATH_() + "mods.json"; }
 
 const std::string VERSIONS_JSON = "versions.json";
 const std::string GAME_EXE_NAME = "FunkinMoon.exe";
@@ -51,43 +53,22 @@ struct ProgressData { double downloaded=0, total=0, speed=0; };
 ProgressData progressData;
 
 struct Version {
-    std::string numero;
+    std::string number;
     std::string zipUrl;
-    std::string estado; // moon_phase, pre_release, final
+    std::string state; // moon_phase, pre_release, final
 };
 
 struct UserData {
-    std::string nome, apelido, id, avatarUrl;
-    bool logado = false;
+    std::string name, nickname, id, avatarUrl;
+    bool loggedIn = false;
 };
 UserData currentUser;
 
 size_t writeFileCb(void* p, size_t s, size_t n, FILE* f) { return fwrite(p,s,n,f); }
-size_t writeStrCb(void* p, size_t s, size_t n, std::string* str) {
-    str->append((char*)p,s*n); return s*n;
-}
 int progressCb(void* p, curl_off_t dlt, curl_off_t dln, curl_off_t, curl_off_t) {
     auto* d=(ProgressData*)p; d->downloaded=(double)dln; d->total=(double)dlt; return 0;
 }
-std::string curlGet(const std::string& url) {
-    std::string res;
-    CURL* c=curl_easy_init();
-    if(c){
-        curl_easy_setopt(c,CURLOPT_URL,url.c_str());
-        curl_easy_setopt(c,CURLOPT_WRITEFUNCTION,writeStrCb);
-        curl_easy_setopt(c,CURLOPT_WRITEDATA,&res);
-        curl_easy_setopt(c,CURLOPT_FOLLOWLOCATION,1L);
-        curl_easy_setopt(c,CURLOPT_SSL_VERIFYPEER,0L);
-        curl_easy_setopt(c,CURLOPT_SSL_VERIFYHOST,0L);
-        curl_easy_setopt(c,CURLOPT_USERAGENT,"Mozilla/5.0");
-        curl_easy_setopt(c,CURLOPT_TIMEOUT,15L);
-        curl_easy_perform(c);
-        curl_easy_cleanup(c);
-    }
-    return res;
-}
 
-// ======= JSON =======
 std::string jStr(const std::string& json, const std::string& key) {
     std::string s="\""+key+"\":\"";
     size_t p=json.find(s); if(p==std::string::npos) return "";
@@ -104,38 +85,29 @@ std::string jStr(const std::string& json, const std::string& key) {
     return out;
 }
 
-void salvarUser() {
+void saveUser() {
     fs::create_directories(SAVES_PATH_());
     std::ofstream f(SAVE_FILE_());
-    if(!f.is_open()){
-        printf("[ERRO] Nao foi possivel escrever em: %s\n", SAVE_FILE_().c_str());
-        return;
-    }
-    f<<"{\n  \"nome\":\""<<currentUser.nome<<"\",\n  \"apelido\":\""
-     <<currentUser.apelido<<"\",\n  \"id\":\""<<currentUser.id
+    if(!f.is_open()) return;
+    f<<"{\n  \"name\":\""<<currentUser.name<<"\",\n  \"nickname\":\""
+     <<currentUser.nickname<<"\",\n  \"id\":\""<<currentUser.id
      <<"\",\n  \"avatarUrl\":\""<<currentUser.avatarUrl<<"\"\n}\n";
-    f.close();
-    printf("[OK] Save escrito em: %s\n", SAVE_FILE_().c_str());
 }
-bool carregarUser() {
+bool loadUser() {
     std::string savePath = SAVE_FILE_();
-    if(!fs::exists(savePath)){
-        printf("[INFO] Nenhum save encontrado em: %s\n", savePath.c_str());
-        return false;
-    }
+    if(!fs::exists(savePath)) return false;
     std::ifstream f(savePath);
     std::string json((std::istreambuf_iterator<char>(f)),std::istreambuf_iterator<char>());
-    currentUser.nome=jStr(json,"nome"); currentUser.apelido=jStr(json,"apelido");
+    currentUser.name=jStr(json,"name"); currentUser.nickname=jStr(json,"nickname");
     currentUser.id=jStr(json,"id");     currentUser.avatarUrl=jStr(json,"avatarUrl");
-    currentUser.logado=!currentUser.nome.empty();
-    printf("[OK] Save carregado de: %s (nome='%s')\n", savePath.c_str(), currentUser.nome.c_str());
-    return currentUser.logado;
+    currentUser.loggedIn=!currentUser.name.empty();
+    return currentUser.loggedIn;
 }
 
-std::vector<Version> carregarVersions() {
-    std::vector<Version> vers;
+std::vector<Version> loadVersions() {
+    std::vector<Version> versions;
     std::ifstream f(VERSIONS_JSON);
-    if(!f.is_open()) return vers;
+    if(!f.is_open()) return versions;
     std::string json((std::istreambuf_iterator<char>(f)),std::istreambuf_iterator<char>());
     std::string token="{\"numero\":";
     size_t pos=0;
@@ -145,15 +117,15 @@ std::vector<Version> carregarVersions() {
         std::string chunk=json.substr(pos,end-pos);
         pos+=token.size();
         Version v;
-        v.numero=jStr(chunk,"numero"); v.zipUrl=jStr(chunk,"zipUrl"); v.estado=jStr(chunk,"estado");
-        if(!v.numero.empty()) vers.push_back(v);
+        v.number=jStr(chunk,"numero"); v.zipUrl=jStr(chunk,"zipUrl"); v.state=jStr(chunk,"estado");
+        if(!v.number.empty()) versions.push_back(v);
     }
-    return vers;
+    return versions;
 }
 
 struct InstalledEntry {
     std::string version;
-    std::string path;    
+    std::string path;
     bool installed = false;
 };
 
@@ -168,13 +140,31 @@ bool jBool(const std::string& json, const std::string& key) {
     return json.compare(p, 4, "true") == 0;
 }
 
-std::vector<InstalledEntry> carregarInstalled() {
+std::vector<std::string> jStrArray(const std::string& json, const std::string& key) {
+    std::vector<std::string> out;
+    std::string s = "\"" + key + "\":[";
+    size_t p = json.find(s);
+    if (p == std::string::npos) return out;
+    p += s.size();
+    size_t e = json.find(']', p);
+    if (e == std::string::npos) return out;
+    std::string arr = json.substr(p, e - p);
+    size_t i = 0;
+    while (i < arr.size()) {
+        size_t q1 = arr.find('"', i);
+        if (q1 == std::string::npos) break;
+        size_t q2 = arr.find('"', q1 + 1);
+        if (q2 == std::string::npos) break;
+        out.push_back(arr.substr(q1 + 1, q2 - q1 - 1));
+        i = q2 + 1;
+    }
+    return out;
+}
+
+std::vector<InstalledEntry> loadInstalled() {
     std::vector<InstalledEntry> out;
     std::string path = INSTALLED_FILE_();
-    if (!fs::exists(path)) {
-        printf("[INFO] Nenhum installed.json encontrado em: %s\n", path.c_str());
-        return out;
-    }
+    if (!fs::exists(path)) return out;
     std::ifstream f(path);
     std::string json((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
 
@@ -191,18 +181,59 @@ std::vector<InstalledEntry> carregarInstalled() {
         e.installed = jBool(chunk, "installed");
         if (!e.version.empty()) out.push_back(e);
     }
-    printf("[OK] installed.json carregado (%d entradas) de: %s\n", (int)out.size(), path.c_str());
     return out;
 }
 
-std::string resolveExePath(const std::vector<InstalledEntry>& installed, const std::string& numero) {
+struct ModEntry {
+    std::string folder;
+    bool enabled = false;
+};
+
+std::vector<ModEntry> loadMods() {
+    std::vector<ModEntry> mods;
+    std::string path = MODS_PATH_();
+    fs::create_directories(path);
+
+    std::vector<std::string> enabledList;
+    if (fs::exists(MODS_STATE_FILE_())) {
+        std::ifstream f(MODS_STATE_FILE_());
+        std::string json((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        enabledList = jStrArray(json, "enabled");
+    }
+
+    for (auto& entry : fs::directory_iterator(path)) {
+        if (!entry.is_directory()) continue;
+        ModEntry m;
+        m.folder = entry.path().filename().string();
+        m.enabled = std::find(enabledList.begin(), enabledList.end(), m.folder) != enabledList.end();
+        mods.push_back(m);
+    }
+    return mods;
+}
+
+void saveModsState(const std::vector<ModEntry>& mods) {
+    fs::create_directories(SAVES_PATH_());
+    std::ofstream f(MODS_STATE_FILE_());
+    if (!f.is_open()) return;
+    f << "{\n  \"enabled\":[";
+    bool first = true;
+    for (auto& m : mods) {
+        if (!m.enabled) continue;
+        if (!first) f << ",";
+        f << "\n    \"" << m.folder << "\"";
+        first = false;
+    }
+    f << "\n  ]\n}\n";
+}
+
+std::string resolveExePath(const std::vector<InstalledEntry>& installed, const std::string& number) {
     for (auto& e : installed) {
-        if (e.version == numero && e.installed) {
+        if (e.version == number && e.installed) {
             std::string full = exeDir() + e.path + "\\" + GAME_EXE_NAME;
             if (fs::exists(full)) return full;
         }
     }
-    return VERSIONS_PATH_() + numero + "\\" + GAME_EXE_NAME;
+    return VERSIONS_PATH_() + number + "\\" + GAME_EXE_NAME;
 }
 
 std::string fmtBytes(double b) {
@@ -254,7 +285,7 @@ sf::Texture makeCircleTexture(sf::Texture& src, unsigned int size) {
     return rt.getTexture();
 }
 
-void telaLoading(sf::RenderWindow& window, sf::Font& fontTitle) {
+void loadingScreen(sf::RenderWindow& window, sf::Font& fontTitle) {
     sf::Texture bgTex, moonTex;
     bool hasBg   = bgTex.loadFromFile(A_LOADING+"loadingBackCard.png");
     bool hasMoon = moonTex.loadFromFile(A_LOADING+"moonLoading.png");
@@ -298,7 +329,7 @@ void telaLoading(sf::RenderWindow& window, sf::Font& fontTitle) {
         if(clk.getElapsedTime().asSeconds()+dt>=dur) break;
     }
 }
-bool telaLogin(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText) {
+bool loginScreen(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText) {
     sf::Texture bgTex, btnTex;
     bool hasBg  = bgTex.loadFromFile(A_LOGIN+"loginBackCard.png");
     bool hasBtn = btnTex.loadFromFile(A_LOGIN+"discordButton.png");
@@ -318,10 +349,10 @@ bool telaLogin(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText
     float btnY = WIN_H/2.f+30;
     if(hasBtn) btn.setPosition({btnX,btnY});
 
-    sf::Text titulo(fontTitle,"Login",48);
-    titulo.setFillColor(sf::Color::White);
-    sf::FloatRect tb=titulo.getLocalBounds();
-    titulo.setPosition({WIN_W/2.f-tb.size.x/2.f,WIN_H/2.f-160});
+    sf::Text title(fontTitle,"Login",48);
+    title.setFillColor(sf::Color::White);
+    sf::FloatRect tb=title.getLocalBounds();
+    title.setPosition({WIN_W/2.f-tb.size.x/2.f,WIN_H/2.f-160});
 
     while(window.isOpen()){
         sf::Vector2f mouse(sf::Mouse::getPosition(window));
@@ -330,12 +361,12 @@ bool telaLogin(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText
         while(const std::optional ev=window.pollEvent()){
             if(ev->is<sf::Event::Closed>()){window.close();return false;}
             if(ev->is<sf::Event::MouseButtonPressed>()&&hBtn){
-                currentUser.nome="Convidado-Guloso";
-                currentUser.apelido="convidado_guloso";
+                currentUser.name="Guest-User";
+                currentUser.nickname="guest_user";
                 currentUser.id="000000000000";
                 currentUser.avatarUrl="";
-                currentUser.logado=true;
-                salvarUser();
+                currentUser.loggedIn=true;
+                saveUser();
                 return true;
             }
         }
@@ -344,14 +375,14 @@ bool telaLogin(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText
         if(hasBg) window.draw(bg);
         else window.draw(roundRect(cardX,cardY,cardW,cardH,14,sf::Color(0,0,0,230)));
 
-        window.draw(titulo);
+        window.draw(title);
 
         if(hasBtn){
             btn.setColor(hBtn?sf::Color(200,200,200):sf::Color::White);
             window.draw(btn);
         } else {
             window.draw(roundRect(btnX,btnY,btnW,btnH,10,hBtn?sf::Color(90,70,180):sf::Color(114,137,218)));
-            sf::Text dt(fontTitle,"Login com Discord",26);
+            sf::Text dt(fontTitle,"Login with Discord",26);
             dt.setFillColor(sf::Color::White);
             sf::FloatRect db=dt.getLocalBounds();
             dt.setPosition({btnX+btnW/2-db.size.x/2,btnY+btnH/2-db.size.y});
@@ -362,16 +393,16 @@ bool telaLogin(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText
     return false;
 }
 
-void telaProgresso(sf::RenderWindow& w, sf::Font& fontTitle, sf::Font& fontText,
-                   bool& baixando, bool& extraindo, bool& concluido, const std::string& titulo) {
-    while(w.isOpen()&&!concluido){
+void progressScreen(sf::RenderWindow& w, sf::Font& fontTitle, sf::Font& fontText,
+                   bool& downloading, bool& extracting, bool& completed, const std::string& title) {
+    while(w.isOpen()&&!completed){
         while(const std::optional ev=w.pollEvent())
             if(ev->is<sf::Event::Closed>()){w.close();return;}
         w.clear(sf::Color(10,15,40));
-        sf::Text t(fontTitle,titulo,26); t.setFillColor(sf::Color::White);
+        sf::Text t(fontTitle,title,26); t.setFillColor(sf::Color::White);
         sf::FloatRect tb=t.getLocalBounds(); t.setPosition({WIN_W/2.f-tb.size.x/2.f,120});
         w.draw(t);
-        if(baixando){
+        if(downloading){
             double pct=progressData.total>0?progressData.downloaded/progressData.total*100:0;
             static double lastDl=0; static sf::Clock spCk;
             double el=spCk.getElapsedTime().asSeconds();
@@ -383,9 +414,9 @@ void telaProgresso(sf::RenderWindow& w, sf::Font& fontTitle, sf::Font& fontText,
             sf::FloatRect pb=pt.getLocalBounds(); pt.setPosition({WIN_W/2.f-pb.size.x/2,304}); w.draw(pt);
             sf::Text mb(fontText,fmtBytes(progressData.downloaded)+" - "+fmtBytes(progressData.total),18);
             mb.setFillColor(sf::Color(180,180,255)); mb.setPosition({100,340}); w.draw(mb);
-            sf::Text sp(fontText,"Speed: "+fmtBytes(progressData.speed)+"per second",18);
+            sf::Text sp(fontText,"Speed: "+fmtBytes(progressData.speed)+" per second",18);
             sp.setFillColor(sf::Color(180,180,255)); sp.setPosition({100,368}); w.draw(sp);
-        } else if(extraindo){
+        } else if(extracting){
             sf::Text st(fontTitle,"Extracting... please wait",24); st.setFillColor(sf::Color::White);
             sf::FloatRect sb=st.getLocalBounds(); st.setPosition({WIN_W/2.f-sb.size.x/2,300}); w.draw(st);
         }
@@ -393,11 +424,11 @@ void telaProgresso(sf::RenderWindow& w, sf::Font& fontTitle, sf::Font& fontText,
     }
 }
 
-void baixarVersao(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText, const Version& ver) {
+void downloadVersion(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText, const Version& ver) {
     progressData={};
-    bool baixando=true, extraindo=false, concluido=false;
+    bool downloading=true, extracting=false, completed=false;
     std::string zipPath=TEMP_PATH_()+"game.zip";
-    std::string destPath=VERSIONS_PATH_()+ver.numero+"\\";
+    std::string destPath=VERSIONS_PATH_()+ver.number+"\\";
 
     std::thread t([&](){
         fs::create_directories(TEMP_PATH_());
@@ -423,53 +454,64 @@ void baixarVersao(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontT
             }
             curl_easy_cleanup(curl);
         }
-        baixando=false; extraindo=true;
+        downloading=false; extracting=true;
         if(ok){
             fs::create_directories(destPath);
             system(("powershell -Command \"Expand-Archive -Path '"+zipPath+"' -DestinationPath '"+destPath+"' -Force\"").c_str());
             fs::remove(zipPath);
         }
-        extraindo=false; concluido=true;
+        extracting=false; completed=true;
     });
-    telaProgresso(window,fontTitle,fontText,baixando,extraindo,concluido,"Baixando "+ver.numero+"...");
+    progressScreen(window,fontTitle,fontText,downloading,extracting,completed,"Downloading "+ver.number+"...");
     t.join();
 }
 
-void telaMods(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText) {
-    auto vers = carregarVersions();
-    auto installed = carregarInstalled();
-    int verSel = 0; 
+void modsScreen(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText) {
+    auto versions = loadVersions();
+    auto installed = loadInstalled();
+    auto mods = loadMods();
+    int selectedVersion = 0;
     float winW=(float)WIN_W, winH=(float)WIN_H;
 
     float listX=SIDEBAR_W+20, listY=60, listW=280, listH=winH-BOTTOMBAR_H-80;
     float modsX=listX+listW+20, modsY=listY, modsW=winW-modsX-20, modsH=listH;
-    float btnPlayX=winW/2-100, btnPlayY=winH-BOTTOMBAR_H+25, btnPlayW=200, btnPlayH=60;
-    float btnVoltarX=SIDEBAR_W+20, btnVoltarY=15, btnVoltarW=100, btnVoltarH=34;
+    float modRowH=44, modToggleW=64, modToggleH=28;
+    float playButtonX=winW/2-100, playButtonY=winH-BOTTOMBAR_H+25, playButtonW=200, playButtonH=60;
+    float backButtonX=SIDEBAR_W+20, backButtonY=15, backButtonW=100, backButtonH=34;
 
     while(window.isOpen()){
         sf::Vector2f mouse(sf::Mouse::getPosition(window));
-        bool hVoltar=mouse.x>=btnVoltarX&&mouse.x<=btnVoltarX+btnVoltarW&&mouse.y>=btnVoltarY&&mouse.y<=btnVoltarY+btnVoltarH;
-        bool hPlay=mouse.x>=btnPlayX&&mouse.x<=btnPlayX+btnPlayW&&mouse.y>=btnPlayY&&mouse.y<=btnPlayY+btnPlayH;
+        bool hoverBack=mouse.x>=backButtonX&&mouse.x<=backButtonX+backButtonW&&mouse.y>=backButtonY&&mouse.y<=backButtonY+backButtonH;
+        bool hoverPlay=mouse.x>=playButtonX&&mouse.x<=playButtonX+playButtonW&&mouse.y>=playButtonY&&mouse.y<=playButtonY+playButtonH;
 
         while(const std::optional ev=window.pollEvent()){
             if(ev->is<sf::Event::Closed>()){window.close();return;}
             if(ev->is<sf::Event::MouseButtonPressed>()){
-                if(hVoltar) return;
+                if(hoverBack) return;
 
-                for(int i=0;i<(int)vers.size();i++){
+                for(int i=0;i<(int)versions.size();i++){
                     float iy=listY+i*52;
                     if(mouse.x>=listX&&mouse.x<=listX+listW&&mouse.y>=iy&&mouse.y<=iy+46)
-                        verSel=i;
+                        selectedVersion=i;
                 }
 
-                if(hPlay&&!vers.empty()){
-                    std::string exePath=resolveExePath(installed, vers[verSel].numero);
+                if(hoverPlay&&!versions.empty()){
+                    std::string exePath=resolveExePath(installed, versions[selectedVersion].number);
                     if(fs::exists(exePath)){
                         window.setVisible(false);
                         system(("\""+exePath+"\"").c_str());
                         window.setVisible(true);
                     } else {
-                        baixarVersao(window,fontTitle,fontText,vers[verSel]);
+                        downloadVersion(window,fontTitle,fontText,versions[selectedVersion]);
+                    }
+                }
+
+                for(int i=0;i<(int)mods.size();i++){
+                    float iy=modsY+i*modRowH;
+                    float tx=modsX+modsW-modToggleW-16, ty=iy+(modRowH-modToggleH)/2.f;
+                    if(mouse.x>=tx&&mouse.x<=tx+modToggleW&&mouse.y>=ty&&mouse.y<=ty+modToggleH){
+                        mods[i].enabled=!mods[i].enabled;
+                        saveModsState(mods);
                     }
                 }
             }
@@ -479,61 +521,78 @@ void telaMods(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText)
 
         window.draw(roundRect(0,winH-BOTTOMBAR_H,winW,BOTTOMBAR_H,0,sf::Color(0,0,0,220)));
 
-        window.draw(roundRect(btnVoltarX,btnVoltarY,btnVoltarW,btnVoltarH,6,hVoltar?sf::Color(60,60,80):sf::Color(40,40,60)));
-        sf::Text vt(fontText,"Back",18); vt.setFillColor(sf::Color::White); vt.setPosition({btnVoltarX+10,btnVoltarY+7}); window.draw(vt);
+        window.draw(roundRect(backButtonX,backButtonY,backButtonW,backButtonH,6,hoverBack?sf::Color(60,60,80):sf::Color(40,40,60)));
+        sf::Text vt(fontText,"Back",18); vt.setFillColor(sf::Color::White); vt.setPosition({backButtonX+10,backButtonY+7}); window.draw(vt);
 
-        sf::Text titulo(fontTitle,"Mods",34); titulo.setFillColor(sf::Color::White);
-        titulo.setPosition({SIDEBAR_W+140,15}); window.draw(titulo);
+        sf::Text title(fontTitle,"Mods",34); title.setFillColor(sf::Color::White);
+        title.setPosition({SIDEBAR_W+140,15}); window.draw(title);
 
         window.draw(roundRect(listX-4,listY-4,listW+8,listH+8,8,sf::Color(20,20,40)));
-        sf::Text ltitle(fontText,"",18); ltitle.setFillColor(sf::Color(150,150,200));
-        ltitle.setPosition({listX+8,listY-30}); window.draw(ltitle);
 
-        for(int i=0;i<(int)vers.size();i++){
+        for(int i=0;i<(int)versions.size();i++){
             float iy=listY+i*52;
-            bool sel=(i==verSel);
+            bool sel=(i==selectedVersion);
             bool hov=mouse.x>=listX&&mouse.x<=listX+listW&&mouse.y>=iy&&mouse.y<=iy+46;
             sf::Color cardCol = sel?sf::Color(60,80,160): hov?sf::Color(40,40,70):sf::Color(25,25,50);
             window.draw(roundRect(listX,iy,listW,46,6,cardCol));
 
-            sf::Color badgeCol = vers[i].estado=="final"?sf::Color(40,160,80):
-                                 vers[i].estado=="pre_release"?sf::Color(200,140,0):sf::Color(100,60,180);
-            std::string badgeStr = vers[i].estado=="final"?"Final":
-                                   vers[i].estado=="pre_release"?"Pre-Release":"Moon Phase";
+            sf::Color badgeCol = versions[i].state=="final"?sf::Color(40,160,80):
+                                 versions[i].state=="pre_release"?sf::Color(200,140,0):sf::Color(100,60,180);
+            std::string badgeStr = versions[i].state=="final"?"Final":
+                                   versions[i].state=="pre_release"?"Pre-Release":"Moon Phase";
             window.draw(roundRect(listX+listW-120,iy+8,110,28,5,badgeCol));
             sf::Text badge(fontText,badgeStr,12); badge.setFillColor(sf::Color::White);
             sf::FloatRect bb=badge.getLocalBounds();
             badge.setPosition({listX+listW-120+(110-bb.size.x)/2,iy+13}); window.draw(badge);
 
-            sf::Text vnum(fontTitle,vers[i].numero,18); vnum.setFillColor(sf::Color::White);
+            sf::Text vnum(fontTitle,versions[i].number,18); vnum.setFillColor(sf::Color::White);
             vnum.setPosition({listX+10,iy+6}); window.draw(vnum);
 
-            std::string exePath=resolveExePath(installed, vers[i].numero);
+            std::string exePath=resolveExePath(installed, versions[i].number);
             bool inst=fs::exists(exePath);
             sf::Text instTxt(fontText,inst?"Install":"Not install",13);
             instTxt.setFillColor(inst?sf::Color(80,200,80):sf::Color(160,160,160));
             instTxt.setPosition({listX+10,iy+28}); window.draw(instTxt);
         }
 
-        if(vers.empty()){
+        if(versions.empty()){
             sf::Text empty(fontText,"No versions here...",18); empty.setFillColor(sf::Color(150,150,180));
             empty.setPosition({listX+10,listY+20}); window.draw(empty);
         }
 
         window.draw(roundRect(modsX-4,modsY-4,modsW+8,modsH+8,8,sf::Color(20,20,40)));
-        sf::Text mPlaceholder(fontText,"Mods soon...",20);
-        mPlaceholder.setFillColor(sf::Color(100,100,140));
-        mPlaceholder.setPosition({modsX+20,modsY+modsH/2}); window.draw(mPlaceholder);
 
-        if(!vers.empty()){
-            std::string exePath=resolveExePath(installed, vers[verSel].numero);
+        for(int i=0;i<(int)mods.size();i++){
+            float iy=modsY+i*modRowH;
+            float tx=modsX+modsW-modToggleW-16, ty=iy+(modRowH-modToggleH)/2.f;
+            bool hovToggle=mouse.x>=tx&&mouse.x<=tx+modToggleW&&mouse.y>=ty&&mouse.y<=ty+modToggleH;
+
+            sf::Text mName(fontText,mods[i].folder,16); mName.setFillColor(sf::Color(220,220,230));
+            mName.setPosition({modsX+16,iy+(modRowH-20)/2.f}); window.draw(mName);
+
+            sf::Color toggleCol = mods[i].enabled?(hovToggle?sf::Color(30,150,60):sf::Color(40,180,70))
+                                                  :(hovToggle?sf::Color(80,80,90):sf::Color(60,60,70));
+            window.draw(roundRect(tx,ty,modToggleW,modToggleH,8,toggleCol));
+            sf::Text tt(fontText,mods[i].enabled?"ON":"OFF",14); tt.setFillColor(sf::Color::White);
+            sf::FloatRect ttb=tt.getLocalBounds();
+            tt.setPosition({tx+modToggleW/2-ttb.size.x/2,ty+modToggleH/2-ttb.size.y}); window.draw(tt);
+        }
+
+        if(mods.empty()){
+            sf::Text empty(fontText,"No mods found. Drop mod folders into the mods folder.",16);
+            empty.setFillColor(sf::Color(100,100,140));
+            empty.setPosition({modsX+16,modsY+20}); window.draw(empty);
+        }
+
+        if(!versions.empty()){
+            std::string exePath=resolveExePath(installed, versions[selectedVersion].number);
             bool inst=fs::exists(exePath);
-            sf::Color playCol=inst?(hPlay?sf::Color(30,120,30):sf::Color(40,160,40)):
-                                   (hPlay?sf::Color(120,80,20):sf::Color(160,110,20));
-            window.draw(roundRect(btnPlayX,btnPlayY,btnPlayW,btnPlayH,10,playCol));
+            sf::Color playCol=inst?(hoverPlay?sf::Color(30,120,30):sf::Color(40,160,40)):
+                                   (hoverPlay?sf::Color(120,80,20):sf::Color(160,110,20));
+            window.draw(roundRect(playButtonX,playButtonY,playButtonW,playButtonH,10,playCol));
             sf::Text pt(fontTitle,inst?"PLAY":"DOWNLOAD",26); pt.setFillColor(sf::Color::White);
             sf::FloatRect pb=pt.getLocalBounds();
-            pt.setPosition({btnPlayX+btnPlayW/2-pb.size.x/2,btnPlayY+btnPlayH/2-pb.size.y});
+            pt.setPosition({playButtonX+playButtonW/2-pb.size.x/2,playButtonY+playButtonH/2-pb.size.y});
             window.draw(pt);
         }
 
@@ -541,14 +600,13 @@ void telaMods(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText)
     }
 }
 
-void telaChangelog(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText) {
-    std::string conteudo="";
+void changelogScreen(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText) {
+    std::string content="";
     std::ifstream f(A_NEWS+"changelog.md");
-    if(f.is_open()){std::string l;while(std::getline(f,l))conteudo+=l+"\n";}
-    else conteudo="## Changelog\nNenhum changelog encontrado.";
+    if(f.is_open()){std::string l;while(std::getline(f,l))content+=l+"\n";}
+    else content="## Changelog\nNo changelog found.";
 
     float scroll=0.f;
-    float maxScroll=9999.f;
 
     while(window.isOpen()){
         while(const std::optional ev=window.pollEvent()){
@@ -562,37 +620,37 @@ void telaChangelog(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& font
         window.clear(sf::Color(10,15,40));
 
         float y=60.f-scroll;
-        std::istringstream stream(conteudo);
-        std::string linha;
-        while(std::getline(stream,linha)){
+        std::istringstream stream(content);
+        std::string line;
+        while(std::getline(stream,line)){
             if(y>-60&&y<(float)WIN_H+60){
-                if(linha.size()>=3&&linha.substr(0,3)=="## "){
-                    sf::Text t(fontTitle,linha.substr(3),28);
+                if(line.size()>=3&&line.substr(0,3)=="## "){
+                    sf::Text t(fontTitle,line.substr(3),28);
                     t.setFillColor(sf::Color(180,180,255)); t.setPosition({SIDEBAR_W+20,y}); window.draw(t); y+=42;
-                } else if(linha.size()>=2&&linha.substr(0,2)=="# "){
-                    sf::Text t(fontTitle,linha.substr(2),36);
+                } else if(line.size()>=2&&line.substr(0,2)=="# "){
+                    sf::Text t(fontTitle,line.substr(2),36);
                     t.setFillColor(sf::Color::White); t.setPosition({SIDEBAR_W+20,y}); window.draw(t); y+=52;
-                } else if(!linha.empty()){
-                    sf::Text t(fontText,linha,20);
+                } else if(!line.empty()){
+                    sf::Text t(fontText,line,20);
                     t.setFillColor(sf::Color(210,210,210)); t.setPosition({SIDEBAR_W+20,y}); window.draw(t); y+=28;
                 } else y+=12;
             } else {
-                if(linha.size()>=3&&linha.substr(0,3)=="## ") y+=42;
-                else if(linha.size()>=2&&linha.substr(0,2)=="# ") y+=52;
-                else if(!linha.empty()) y+=28;
+                if(line.size()>=3&&line.substr(0,3)=="## ") y+=42;
+                else if(line.size()>=2&&line.substr(0,2)=="# ") y+=52;
+                else if(!line.empty()) y+=28;
                 else y+=12;
             }
         }
 
-        sf::Text titulo(fontTitle,"Changelog - v0.1.0",32); titulo.setFillColor(sf::Color::White);
-        titulo.setPosition({SIDEBAR_W+20,15}); window.draw(titulo);
+        sf::Text title(fontTitle,"Changelog - v0.1.0",32); title.setFillColor(sf::Color::White);
+        title.setPosition({SIDEBAR_W+20,15}); window.draw(title);
         sf::Text back(fontText,"ESC to back",18); back.setFillColor(sf::Color(100,100,120));
         back.setPosition({SIDEBAR_W+20,(float)WIN_H-30}); window.draw(back);
         window.display();
     }
 }
 
-void telaOpcoes(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText, sf::Texture& avatarTex, bool hasAvatar) {
+void optionsScreen(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText, sf::Texture& avatarTex, bool hasAvatar) {
     float winW=(float)WIN_W, winH=(float)WIN_H;
 
     sf::Texture circTex;
@@ -604,17 +662,17 @@ void telaOpcoes(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontTex
     sf::Sprite avatarSpr(hasCirc?circTex:(hasAvatar?avatarTex:circTex));
 
     float avatarX=SIDEBAR_W+40, avatarY=80;
-    float btnSairX=winW/2-150, btnSairY=winH-BOTTOMBAR_H-70, btnSairW=300, btnSairH=50;
+    float logoutButtonX=winW/2-150, logoutButtonY=winH-BOTTOMBAR_H-70, logoutButtonW=300, logoutButtonH=50;
 
     while(window.isOpen()){
         sf::Vector2f mouse(sf::Mouse::getPosition(window));
-        bool hSair=mouse.x>=btnSairX&&mouse.x<=btnSairX+btnSairW&&mouse.y>=btnSairY&&mouse.y<=btnSairY+btnSairH;
+        bool hoverLogout=mouse.x>=logoutButtonX&&mouse.x<=logoutButtonX+logoutButtonW&&mouse.y>=logoutButtonY&&mouse.y<=logoutButtonY+logoutButtonH;
 
         while(const std::optional ev=window.pollEvent()){
             if(ev->is<sf::Event::Closed>()){window.close();return;}
             if(const auto* k=ev->getIf<sf::Event::KeyPressed>())
                 if(k->code==sf::Keyboard::Key::Escape) return;
-            if(ev->is<sf::Event::MouseButtonPressed>()&&hSair){
+            if(ev->is<sf::Event::MouseButtonPressed>()&&hoverLogout){
                 currentUser=UserData();
                 if(fs::exists(SAVE_FILE_())) fs::remove(SAVE_FILE_());
                 window.close(); return;
@@ -623,8 +681,8 @@ void telaOpcoes(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontTex
 
         window.clear(sf::Color(10,15,40));
 
-        sf::Text titulo(fontTitle,"Config's",34); titulo.setFillColor(sf::Color::White);
-        titulo.setPosition({SIDEBAR_W+20,15}); window.draw(titulo);
+        sf::Text title(fontTitle,"Settings",34); title.setFillColor(sf::Color::White);
+        title.setPosition({SIDEBAR_W+20,15}); window.draw(title);
 
         if(hasCirc){
             avatarSpr.setPosition({avatarX,avatarY});
@@ -633,18 +691,18 @@ void telaOpcoes(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontTex
             window.draw(roundRect(avatarX,avatarY,120,120,60,sf::Color(60,60,80)));
         }
 
-        sf::Text nome(fontTitle,currentUser.nome,30); nome.setFillColor(sf::Color::White);
-        nome.setPosition({avatarX+140,avatarY+10}); window.draw(nome);
-        sf::Text apelido(fontText,"@"+currentUser.apelido,22); apelido.setFillColor(sf::Color(160,160,180));
-        apelido.setPosition({avatarX+140,avatarY+52}); window.draw(apelido);
-        sf::Text id(fontText,"ID: "+currentUser.id,18); id.setFillColor(sf::Color(100,100,120));
-        id.setPosition({avatarX+140,avatarY+82}); window.draw(id);
+        sf::Text nameText(fontTitle,currentUser.name,30); nameText.setFillColor(sf::Color::White);
+        nameText.setPosition({avatarX+140,avatarY+10}); window.draw(nameText);
+        sf::Text nicknameText(fontText,"@"+currentUser.nickname,22); nicknameText.setFillColor(sf::Color(160,160,180));
+        nicknameText.setPosition({avatarX+140,avatarY+52}); window.draw(nicknameText);
+        sf::Text idText(fontText,"ID: "+currentUser.id,18); idText.setFillColor(sf::Color(100,100,120));
+        idText.setPosition({avatarX+140,avatarY+82}); window.draw(idText);
 
-        window.draw(roundRect(btnSairX,btnSairY,btnSairW,btnSairH,8,hSair?sf::Color(200,40,40):sf::Color(150,30,30)));
-        sf::Text sair(fontTitle,"Exit to Account",22); sair.setFillColor(sf::Color::White);
-        sf::FloatRect sb=sair.getLocalBounds();
-        sair.setPosition({btnSairX+btnSairW/2-sb.size.x/2,btnSairY+btnSairH/2-sb.size.y});
-        window.draw(sair);
+        window.draw(roundRect(logoutButtonX,logoutButtonY,logoutButtonW,logoutButtonH,8,hoverLogout?sf::Color(200,40,40):sf::Color(150,30,30)));
+        sf::Text logout(fontTitle,"Exit to Account",22); logout.setFillColor(sf::Color::White);
+        sf::FloatRect sb=logout.getLocalBounds();
+        logout.setPosition({logoutButtonX+logoutButtonW/2-sb.size.x/2,logoutButtonY+logoutButtonH/2-sb.size.y});
+        window.draw(logout);
 
         sf::Text back(fontText,"ESC to Back",18); back.setFillColor(sf::Color(100,100,120));
         back.setPosition({SIDEBAR_W+20,winH-30}); window.draw(back);
@@ -652,25 +710,25 @@ void telaOpcoes(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontTex
     }
 }
 
-void telaHome(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText, sf::Font& fontMono) {
+void homeScreen(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText) {
     float winW=(float)WIN_W, winH=(float)WIN_H;
 
-    const float SB_W   = 185.f;  
-    const float BT_H   = 120.f;  
-    const float SB_H   = winH - BT_H; 
-    const float ICON_S = 110.f;  
-    const float OPT_S  = 110.f; 
+    const float SB_W   = 185.f;
+    const float BT_H   = 120.f;
+    const float SB_H   = winH - BT_H;
+    const float ICON_S = 110.f;
+    const float OPT_S  = 110.f;
     const float ICON_X = SB_W/2.f - ICON_S/2.f;
 
     float iconY1 = 20.f;
     float iconY2 = 150.f;
     float iconY3 = 280.f;
-    float iconY4 = 410.f; 
+    float iconY4 = 410.f;
 
 
     float AVT_S  = 80.f;
     float AVT_X  = SB_W/2.f - AVT_S/2.f;
-    float AVT_Y  = winH - BT_H + 8.f; 
+    float AVT_Y  = winH - BT_H + 8.f;
 
     sf::Texture bgTex, playTex, leftBarTex, downBarTex;
     sf::Texture modTex, webTex, newsTex, optTex;
@@ -785,23 +843,23 @@ void telaHome(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText,
         while(const std::optional ev=window.pollEvent()){
             if(ev->is<sf::Event::Closed>()){window.close();return;}
             if(ev->is<sf::Event::MouseButtonPressed>()){
-                if(hMod)  telaMods(window,fontTitle,fontText);
-                if(hNews) telaChangelog(window,fontTitle,fontText);
-                if(hOpt)  telaOpcoes(window,fontTitle,fontText,hasAvImg?avatarTex:fallbackTex,hasUser);
+                if(hMod)  modsScreen(window,fontTitle,fontText);
+                if(hNews) changelogScreen(window,fontTitle,fontText);
+                if(hOpt)  optionsScreen(window,fontTitle,fontText,hasAvImg?avatarTex:fallbackTex,hasUser);
                 if(hPlay){
-                    auto vers=carregarVersions();
-                    auto installed=carregarInstalled();
-                    bool abriu=false;
-                    for(auto& v:vers){
-                        std::string exe=resolveExePath(installed, v.numero);
+                    auto versions=loadVersions();
+                    auto installed=loadInstalled();
+                    bool launched=false;
+                    for(auto& v:versions){
+                        std::string exe=resolveExePath(installed, v.number);
                         if(fs::exists(exe)){
                             window.setVisible(false);
                             system(("\""+exe+"\"").c_str());
                             window.setVisible(true);
-                            abriu=true; break;
+                            launched=true; break;
                         }
                     }
-                    if(!abriu) telaMods(window,fontTitle,fontText);
+                    if(!launched) modsScreen(window,fontTitle,fontText);
                 }
             }
         }
@@ -831,11 +889,11 @@ void telaHome(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText,
         if(hasCirc) window.draw(avatarSpr);
         else if(hasUser) window.draw(avatarSpr);
 
-        sf::Text nomeT(fontText,currentUser.nome,14);
-        nomeT.setFillColor(sf::Color(200,200,200));
-        sf::FloatRect nb=nomeT.getLocalBounds();
-        nomeT.setPosition({SB_W/2.f-nb.size.x/2.f, AVT_Y+AVT_S+4});
-        window.draw(nomeT);
+        sf::Text nameText(fontText,currentUser.name,14);
+        nameText.setFillColor(sf::Color(200,200,200));
+        sf::FloatRect nb=nameText.getLocalBounds();
+        nameText.setPosition({SB_W/2.f-nb.size.x/2.f, AVT_Y+AVT_S+4});
+        window.draw(nameText);
 
         if(hasPlay){
             playSpr.setColor(hPlay?sf::Color(180,180,180):sf::Color::White);
@@ -853,13 +911,9 @@ void telaHome(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText,
 }
 
 int main(){
-
-    AllocConsole();
-    freopen("CONOUT$","w",stdout);
-
     sf::RenderWindow window(
         sf::VideoMode({WIN_W,WIN_H}),
-        "Moon' Launcher (Dev Build)",
+        "Moon Launcher (Dev Build)",
         sf::Style::Titlebar|sf::Style::Close
     );
     window.setFramerateLimit(60);
@@ -874,20 +928,18 @@ int main(){
     fontText.openFromFile(A_FONTS+"FunkinLingLong.otf");
     fontMono.openFromFile(A_FONTS+"VcrMono.ttf");
 
-    printf("[INFO] Pasta de dados: %s\n", BASE_PATH_().c_str());
-
     fs::create_directories(VERSIONS_PATH_());
     fs::create_directories(SAVES_PATH_());
     fs::create_directories(TEMP_PATH_());
 
-    bool logado=carregarUser();
-    if(!logado){
-        logado=telaLogin(window,fontTitle,fontText);
+    bool loggedIn=loadUser();
+    if(!loggedIn){
+        loggedIn=loginScreen(window,fontTitle,fontText);
         if(!window.isOpen()) return 0;
-        if(logado) telaLoading(window,fontTitle);
+        if(loggedIn) loadingScreen(window,fontTitle);
     }
-    if(window.isOpen()&&logado)
-        telaHome(window,fontTitle,fontText,fontMono);
+    if(window.isOpen()&&loggedIn)
+        homeScreen(window,fontTitle,fontText);
 
     return 0;
 }
