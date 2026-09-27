@@ -1,0 +1,12 @@
+{
+  "name": "moon-engine-launcher",
+  "version": "0.1.0",
+  "dependencies": [
+    {
+      "name": "sfml",
+      "default-features": false,
+      "features": ["graphics", "window"]
+    },
+    "curl"
+  ]
+}

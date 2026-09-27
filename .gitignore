@@ -1,2 +1,11 @@
 *.dll
 vscode-project.hxml
+
+build/
+build-android/
+vcpkg_installed/
+android/.gradle/
+android/local.properties
+android/app/build/
+android/app/.cxx/
+*.apk

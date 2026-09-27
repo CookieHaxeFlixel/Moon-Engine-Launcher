@@ -1,4 +1,5 @@
 #include <SFML/Graphics.hpp>
+#include <SFML/System/FileInputStream.hpp>
 #include <curl/curl.h>
 #include <cstdlib>
 #include <cmath>
@@ -10,7 +11,16 @@
 #include <iomanip>
 #include <vector>
 #include <algorithm>
+
+#if defined(_WIN32)
 #include <windows.h>
+#elif defined(__ANDROID__)
+#include <SFML/System/NativeActivity.hpp>
+#include <android/native_activity.h>
+#include <jni.h>
+#endif
+
+#include "third_party/miniz/miniz.h"
 
 namespace fs = std::filesystem;
 
@@ -19,6 +29,7 @@ const unsigned int WIN_H = 720;
 const float SIDEBAR_W    = 185.f;
 const float BOTTOMBAR_H  = 120.f;
 
+#if defined(_WIN32)
 std::string exeDir() {
     static std::string dir = [](){
         char buffer[MAX_PATH];
@@ -29,25 +40,32 @@ std::string exeDir() {
     }();
     return dir;
 }
+std::string BASE_PATH_() { return exeDir() + "com.funkinmoon/"; }
+const std::string GAME_EXE_NAME = "FunkinMoon.exe";
+#elif defined(__ANDROID__)
+std::string BASE_PATH_() {
+    static std::string dir = std::string(sf::getNativeActivity()->internalDataPath) + "/";
+    return dir;
+}
+const std::string ANDROID_GAME_PACKAGE = "com.funkinmoon.game";
+#endif
 
-std::string BASE_PATH_()     { return exeDir() + "com.funkinmoon\\"; }
-std::string VERSIONS_PATH_() { return BASE_PATH_() + "versions\\"; }
-std::string SAVES_PATH_()    { return BASE_PATH_() + "data\\saves\\"; }
-std::string TEMP_PATH_()     { return BASE_PATH_() + "temp_extract\\"; }
+std::string VERSIONS_PATH_() { return BASE_PATH_() + "versions/"; }
+std::string SAVES_PATH_()    { return BASE_PATH_() + "data/saves/"; }
+std::string TEMP_PATH_()     { return BASE_PATH_() + "temp_extract/"; }
 std::string SAVE_FILE_()     { return SAVES_PATH_() + "user.json"; }
-std::string MODS_PATH_()     { return BASE_PATH_() + "mods\\"; }
+std::string MODS_PATH_()     { return BASE_PATH_() + "mods/"; }
 std::string MODS_STATE_FILE_() { return SAVES_PATH_() + "mods.json"; }
 
 const std::string VERSIONS_JSON = "versions.json";
-const std::string GAME_EXE_NAME = "FunkinMoon.exe";
 
-const std::string A_UI      = "assets\\ui\\";
-const std::string A_HOME    = A_UI + "home\\";
-const std::string A_LOGIN   = A_UI + "login\\";
-const std::string A_LOADING = A_UI + "loading\\";
-const std::string A_NEWS    = A_UI + "news\\docs\\";
-const std::string A_FONTS   = A_UI + "fonts\\";
-const std::string A_ICON    = "assets\\app\\icons\\icon-moon.png";
+const std::string A_UI      = "assets/ui/";
+const std::string A_HOME    = A_UI + "home/";
+const std::string A_LOGIN   = A_UI + "login/";
+const std::string A_LOADING = A_UI + "loading/";
+const std::string A_NEWS    = A_UI + "news/docs/";
+const std::string A_FONTS   = A_UI + "fonts/";
+const std::string A_ICON    = "assets/app/icons/icon-moon.png";
 
 struct ProgressData { double downloaded=0, total=0, speed=0; };
 ProgressData progressData;
@@ -67,6 +85,42 @@ UserData currentUser;
 size_t writeFileCb(void* p, size_t s, size_t n, FILE* f) { return fwrite(p,s,n,f); }
 int progressCb(void* p, curl_off_t dlt, curl_off_t dln, curl_off_t, curl_off_t) {
     auto* d=(ProgressData*)p; d->downloaded=(double)dln; d->total=(double)dlt; return 0;
+}
+
+bool downloadToFile(const std::string& url, const std::string& destPath, ProgressData* progress=nullptr, uintmax_t minSize=0) {
+    CURL* curl=curl_easy_init();
+    if(!curl) return false;
+    FILE* fp=fopen(destPath.c_str(),"wb");
+    if(!fp){ curl_easy_cleanup(curl); return false; }
+    curl_easy_setopt(curl,CURLOPT_URL,url.c_str());
+    curl_easy_setopt(curl,CURLOPT_WRITEFUNCTION,writeFileCb);
+    curl_easy_setopt(curl,CURLOPT_WRITEDATA,fp);
+    if(progress){
+        curl_easy_setopt(curl,CURLOPT_XFERINFOFUNCTION,progressCb);
+        curl_easy_setopt(curl,CURLOPT_XFERINFODATA,progress);
+        curl_easy_setopt(curl,CURLOPT_NOPROGRESS,0L);
+    }
+    curl_easy_setopt(curl,CURLOPT_FOLLOWLOCATION,1L);
+    curl_easy_setopt(curl,CURLOPT_MAXREDIRS,10L);
+    curl_easy_setopt(curl,CURLOPT_SSL_VERIFYPEER,0L);
+    curl_easy_setopt(curl,CURLOPT_SSL_VERIFYHOST,0L);
+    curl_easy_setopt(curl,CURLOPT_USERAGENT,"Mozilla/5.0");
+    CURLcode res=curl_easy_perform(curl);
+    fclose(fp);
+    curl_easy_cleanup(curl);
+    return res==CURLE_OK && fs::exists(destPath) && fs::file_size(destPath)>minSize;
+}
+
+std::string readTextFile(const std::string& path) {
+    sf::FileInputStream f;
+    if(!f.open(path)) return "";
+    auto size = f.getSize();
+    if(!size || *size==0) return "";
+    std::string data(*size, '\0');
+    auto read = f.read(data.data(), *size);
+    if(!read) return "";
+    data.resize(*read);
+    return data;
 }
 
 std::string jStr(const std::string& json, const std::string& key) {
@@ -106,9 +160,8 @@ bool loadUser() {
 
 std::vector<Version> loadVersions() {
     std::vector<Version> versions;
-    std::ifstream f(VERSIONS_JSON);
-    if(!f.is_open()) return versions;
-    std::string json((std::istreambuf_iterator<char>(f)),std::istreambuf_iterator<char>());
+    std::string json = readTextFile(VERSIONS_JSON);
+    if(json.empty()) return versions;
     std::string token="{\"numero\":";
     size_t pos=0;
     while((pos=json.find(token,pos))!=std::string::npos){
@@ -226,15 +279,94 @@ void saveModsState(const std::vector<ModEntry>& mods) {
     f << "\n  ]\n}\n";
 }
 
+#if defined(_WIN32)
 std::string resolveExePath(const std::vector<InstalledEntry>& installed, const std::string& number) {
     for (auto& e : installed) {
         if (e.version == number && e.installed) {
-            std::string full = exeDir() + e.path + "\\" + GAME_EXE_NAME;
+            std::string full = exeDir() + e.path + "/" + GAME_EXE_NAME;
             if (fs::exists(full)) return full;
         }
     }
-    return VERSIONS_PATH_() + number + "\\" + GAME_EXE_NAME;
+    return VERSIONS_PATH_() + number + "/" + GAME_EXE_NAME;
 }
+
+bool isVersionInstalled(const std::vector<InstalledEntry>& installed, const std::string& number) {
+    return fs::exists(resolveExePath(installed, number));
+}
+
+void launchVersion(sf::RenderWindow& window, const std::vector<InstalledEntry>& installed, const std::string& number) {
+    std::string exePath = resolveExePath(installed, number);
+    window.setVisible(false);
+    system(("\""+exePath+"\"").c_str());
+    window.setVisible(true);
+}
+#elif defined(__ANDROID__)
+template<class F>
+auto withActivity(F&& fn) {
+    ANativeActivity* activity = sf::getNativeActivity();
+    JNIEnv* env = nullptr;
+    activity->vm->AttachCurrentThread(&env, nullptr);
+    jclass cls = env->GetObjectClass(activity->clazz);
+    auto result = fn(env, cls, activity->clazz);
+    env->DeleteLocalRef(cls);
+    return result;
+}
+
+bool androidPackageInstalled(const std::string& pkg) {
+    return withActivity([&](JNIEnv* env, jclass cls, jobject self){
+        jmethodID mid = env->GetMethodID(cls, "isPackageInstalled", "(Ljava/lang/String;)Z");
+        jstring jpkg = env->NewStringUTF(pkg.c_str());
+        bool r = env->CallBooleanMethod(self, mid, jpkg);
+        env->DeleteLocalRef(jpkg);
+        return r;
+    });
+}
+
+std::string androidInstalledVersion(const std::string& pkg) {
+    return withActivity([&](JNIEnv* env, jclass cls, jobject self){
+        jmethodID mid = env->GetMethodID(cls, "getInstalledVersionName", "(Ljava/lang/String;)Ljava/lang/String;");
+        jstring jpkg = env->NewStringUTF(pkg.c_str());
+        jstring jres = (jstring)env->CallObjectMethod(self, mid, jpkg);
+        std::string result;
+        if(jres){
+            const char* chars = env->GetStringUTFChars(jres, nullptr);
+            result = chars;
+            env->ReleaseStringUTFChars(jres, chars);
+            env->DeleteLocalRef(jres);
+        }
+        env->DeleteLocalRef(jpkg);
+        return result;
+    });
+}
+
+void androidLaunchPackage(const std::string& pkg) {
+    withActivity([&](JNIEnv* env, jclass cls, jobject self){
+        jmethodID mid = env->GetMethodID(cls, "launchPackage", "(Ljava/lang/String;)V");
+        jstring jpkg = env->NewStringUTF(pkg.c_str());
+        env->CallVoidMethod(self, mid, jpkg);
+        env->DeleteLocalRef(jpkg);
+        return 0;
+    });
+}
+
+void androidInstallApk(const std::string& apkPath) {
+    withActivity([&](JNIEnv* env, jclass cls, jobject self){
+        jmethodID mid = env->GetMethodID(cls, "installApk", "(Ljava/lang/String;)V");
+        jstring jpath = env->NewStringUTF(apkPath.c_str());
+        env->CallVoidMethod(self, mid, jpath);
+        env->DeleteLocalRef(jpath);
+        return 0;
+    });
+}
+
+bool isVersionInstalled(const std::vector<InstalledEntry>&, const std::string& number) {
+    return androidPackageInstalled(ANDROID_GAME_PACKAGE) && androidInstalledVersion(ANDROID_GAME_PACKAGE) == number;
+}
+
+void launchVersion(sf::RenderWindow&, const std::vector<InstalledEntry>&, const std::string&) {
+    androidLaunchPackage(ANDROID_GAME_PACKAGE);
+}
+#endif
 
 std::string fmtBytes(double b) {
     std::ostringstream ss;
@@ -424,41 +556,50 @@ void progressScreen(sf::RenderWindow& w, sf::Font& fontTitle, sf::Font& fontText
     }
 }
 
+#if defined(_WIN32)
+bool extractZip(const std::string& zipPath, const std::string& destDir) {
+    mz_zip_archive zip{};
+    if(!mz_zip_reader_init_file(&zip, zipPath.c_str(), 0)) return false;
+    bool ok=true;
+    int count=(int)mz_zip_reader_get_num_files(&zip);
+    for(int i=0;i<count;i++){
+        mz_zip_archive_file_stat st;
+        if(!mz_zip_reader_file_stat(&zip,i,&st)){ ok=false; continue; }
+        std::string outPath = destDir + st.m_filename;
+        if(mz_zip_reader_is_file_a_directory(&zip,i)){
+            fs::create_directories(outPath);
+            continue;
+        }
+        fs::create_directories(fs::path(outPath).parent_path());
+        if(!mz_zip_reader_extract_to_file(&zip,i,outPath.c_str(),0)) ok=false;
+    }
+    mz_zip_reader_end(&zip);
+    return ok;
+}
+#endif
+
 void downloadVersion(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText, const Version& ver) {
     progressData={};
     bool downloading=true, extracting=false, completed=false;
-    std::string zipPath=TEMP_PATH_()+"game.zip";
-    std::string destPath=VERSIONS_PATH_()+ver.number+"\\";
+#if defined(_WIN32)
+    std::string archivePath=TEMP_PATH_()+"game.zip";
+    std::string destPath=VERSIONS_PATH_()+ver.number+"/";
+#elif defined(__ANDROID__)
+    std::string archivePath=TEMP_PATH_()+"game.apk";
+#endif
 
     std::thread t([&](){
         fs::create_directories(TEMP_PATH_());
-        bool ok=false;
-        CURL* curl=curl_easy_init();
-        if(curl){
-            FILE* fp=fopen(zipPath.c_str(),"wb");
-            if(fp){
-                curl_easy_setopt(curl,CURLOPT_URL,ver.zipUrl.c_str());
-                curl_easy_setopt(curl,CURLOPT_WRITEFUNCTION,writeFileCb);
-                curl_easy_setopt(curl,CURLOPT_WRITEDATA,fp);
-                curl_easy_setopt(curl,CURLOPT_XFERINFOFUNCTION,progressCb);
-                curl_easy_setopt(curl,CURLOPT_XFERINFODATA,&progressData);
-                curl_easy_setopt(curl,CURLOPT_NOPROGRESS,0L);
-                curl_easy_setopt(curl,CURLOPT_FOLLOWLOCATION,1L);
-                curl_easy_setopt(curl,CURLOPT_MAXREDIRS,10L);
-                curl_easy_setopt(curl,CURLOPT_SSL_VERIFYPEER,0L);
-                curl_easy_setopt(curl,CURLOPT_SSL_VERIFYHOST,0L);
-                curl_easy_setopt(curl,CURLOPT_USERAGENT,"Mozilla/5.0");
-                CURLcode res=curl_easy_perform(curl);
-                fclose(fp);
-                if(res==CURLE_OK&&fs::exists(zipPath)&&fs::file_size(zipPath)>1024*1024) ok=true;
-            }
-            curl_easy_cleanup(curl);
-        }
+        bool ok = downloadToFile(ver.zipUrl, archivePath, &progressData, 1024*1024);
         downloading=false; extracting=true;
         if(ok){
+#if defined(_WIN32)
             fs::create_directories(destPath);
-            system(("powershell -Command \"Expand-Archive -Path '"+zipPath+"' -DestinationPath '"+destPath+"' -Force\"").c_str());
-            fs::remove(zipPath);
+            extractZip(archivePath, destPath);
+            fs::remove(archivePath);
+#elif defined(__ANDROID__)
+            androidInstallApk(archivePath);
+#endif
         }
         extracting=false; completed=true;
     });
@@ -496,11 +637,8 @@ void modsScreen(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontTex
                 }
 
                 if(hoverPlay&&!versions.empty()){
-                    std::string exePath=resolveExePath(installed, versions[selectedVersion].number);
-                    if(fs::exists(exePath)){
-                        window.setVisible(false);
-                        system(("\""+exePath+"\"").c_str());
-                        window.setVisible(true);
+                    if(isVersionInstalled(installed, versions[selectedVersion].number)){
+                        launchVersion(window, installed, versions[selectedVersion].number);
                     } else {
                         downloadVersion(window,fontTitle,fontText,versions[selectedVersion]);
                     }
@@ -548,8 +686,7 @@ void modsScreen(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontTex
             sf::Text vnum(fontTitle,versions[i].number,18); vnum.setFillColor(sf::Color::White);
             vnum.setPosition({listX+10,iy+6}); window.draw(vnum);
 
-            std::string exePath=resolveExePath(installed, versions[i].number);
-            bool inst=fs::exists(exePath);
+            bool inst=isVersionInstalled(installed, versions[i].number);
             sf::Text instTxt(fontText,inst?"Install":"Not install",13);
             instTxt.setFillColor(inst?sf::Color(80,200,80):sf::Color(160,160,160));
             instTxt.setPosition({listX+10,iy+28}); window.draw(instTxt);
@@ -585,8 +722,7 @@ void modsScreen(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontTex
         }
 
         if(!versions.empty()){
-            std::string exePath=resolveExePath(installed, versions[selectedVersion].number);
-            bool inst=fs::exists(exePath);
+            bool inst=isVersionInstalled(installed, versions[selectedVersion].number);
             sf::Color playCol=inst?(hoverPlay?sf::Color(30,120,30):sf::Color(40,160,40)):
                                    (hoverPlay?sf::Color(120,80,20):sf::Color(160,110,20));
             window.draw(roundRect(playButtonX,playButtonY,playButtonW,playButtonH,10,playCol));
@@ -601,10 +737,8 @@ void modsScreen(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontTex
 }
 
 void changelogScreen(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontText) {
-    std::string content="";
-    std::ifstream f(A_NEWS+"changelog.md");
-    if(f.is_open()){std::string l;while(std::getline(f,l))content+=l+"\n";}
-    else content="## Changelog\nNo changelog found.";
+    std::string content = readTextFile(A_NEWS+"changelog.md");
+    if(content.empty()) content="## Changelog\nNo changelog found.";
 
     float scroll=0.f;
 
@@ -753,9 +887,8 @@ void homeScreen(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontTex
 
     bool hasAvImg=false;
     if(!currentUser.avatarUrl.empty()){
-        std::string ap=BASE_PATH_()+"data\\avatar_temp.png";
-        system(("powershell -Command \"Invoke-WebRequest -Uri '"+currentUser.avatarUrl+"' -OutFile '"+ap+"'\" 2>nul").c_str());
-        hasAvImg=avatarTex.loadFromFile(ap);
+        std::string ap=BASE_PATH_()+"data/avatar_temp.png";
+        if(downloadToFile(currentUser.avatarUrl, ap)) hasAvImg=avatarTex.loadFromFile(ap);
     }
     sf::Texture& userTex = hasAvImg ? avatarTex : fallbackTex;
     bool hasUser = hasAvImg || hasFall;
@@ -851,11 +984,8 @@ void homeScreen(sf::RenderWindow& window, sf::Font& fontTitle, sf::Font& fontTex
                     auto installed=loadInstalled();
                     bool launched=false;
                     for(auto& v:versions){
-                        std::string exe=resolveExePath(installed, v.number);
-                        if(fs::exists(exe)){
-                            window.setVisible(false);
-                            system(("\""+exe+"\"").c_str());
-                            window.setVisible(true);
+                        if(isVersionInstalled(installed, v.number)){
+                            launchVersion(window, installed, v.number);
                             launched=true; break;
                         }
                     }
