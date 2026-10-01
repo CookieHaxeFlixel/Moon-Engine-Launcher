@@ -2,6 +2,10 @@
 vscode-project.hxml
 
 build/
+com.funkinmoon\versions/v0.0.1/
+com.funkinmoon\versions/v0.1.0/
+export/
+com.funkinmoon/temp_extract/game.zip
 build-android/
 vcpkg_installed/
 vcpkg_binary_cache/
@@ -10,3 +14,4 @@ android/local.properties
 android/app/build/
 android/app/.cxx/
 *.apk
+*.exe
