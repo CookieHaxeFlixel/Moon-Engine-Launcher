@@ -29,17 +29,6 @@ if(ANDROID)
         project.cpp
         ${MINIZ_SOURCES}
     )
-    target_include_directories(main PRIVATE . third_party/miniz)
-    target_link_libraries(main PRIVATE
-        SFML::Graphics
-        SFML::Window
-        SFML::System
-        SFML::Audio
-        SFML::Main
-        CURL::libcurl
-        android
-        log
-    )
     target_link_options(main PRIVATE "-u" "ANativeActivity_onCreate")
 else()
     add_executable(MoonLauncher
@@ -51,6 +40,16 @@ else()
     )
     if(WIN32)
         target_sources(MoonLauncher PRIVATE app.rc)
+        set_target_properties(MoonLauncher PROPERTIES
+            WIN32_EXECUTABLE TRUE
+        )
+
+        add_executable(LauncherUpdater src/LauncherUpdater.cpp)
+        target_link_options(LauncherUpdater PRIVATE -municode)
+        set_target_properties(LauncherUpdater PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/export/windows/release/bin"
+        )
+        add_dependencies(MoonLauncher LauncherUpdater)
     endif()
     target_include_directories(MoonLauncher PRIVATE . third_party/miniz)
     target_link_libraries(MoonLauncher PRIVATE
@@ -84,3 +83,17 @@ else()
         )
     endif()
 endif()
+
+    if(WIN32)
+        set(LAUNCHER_OUTPUT_DIR
+            "${CMAKE_SOURCE_DIR}/export/windows/release/bin"
+        )
+        file(MAKE_DIRECTORY "${LAUNCHER_OUTPUT_DIR}")
+        if(NOT EXISTS "${LAUNCHER_OUTPUT_DIR}/launcher-settings.json")
+            configure_file(
+                "${CMAKE_SOURCE_DIR}/launcher-settings.json"
+                "${LAUNCHER_OUTPUT_DIR}/launcher-settings.json"
+                COPYONLY
+            )
+        endif()
+    endif()

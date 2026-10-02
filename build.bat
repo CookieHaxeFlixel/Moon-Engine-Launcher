@@ -10,6 +10,7 @@ set "GXX=%MSYS_ROOT%\bin\g++.exe"
 set "GCC=%MSYS_ROOT%\bin\gcc.exe"
 set "OUT=%ROOT%export\windows\release\bin"
 set "EXE_TMP=%OUT%\Moon Launcher.building.exe"
+set "ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
 
 if not exist "%MSYS_ROOT%\include\lua.h" (
     echo [ERRO] Lua nao esta instalado no MSYS2 UCRT64.
@@ -74,6 +75,9 @@ echo.
 echo [2/3] Compilando Moon Launcher...
 echo.
 
+"%GXX%" -std=c++17 -municode ".\src\LauncherUpdater.cpp" -o "%OUT%\LauncherUpdater.exe"
+if errorlevel 1 goto ERROR
+
 "%GXX%" -std=c++17 ^
     -I"." ^
     -I".\third_party\miniz" ^
@@ -87,6 +91,7 @@ echo.
     ".\miniz_tinfl.o" ^
     ".\miniz_zip.o" ^
     -o "%EXE_TMP%" ^
+    -mwindows ^
     -L"%MSYS_ROOT%\lib" ^
     -lsfml-graphics ^
     -lsfml-window ^
@@ -124,6 +129,10 @@ if exist "%ROOT%versions.json" (
     copy /Y "%ROOT%versions.json" "%OUT%\versions.json" >nul
 )
 
+if not exist "%OUT%\launcher-settings.json" (
+    copy /Y "%ROOT%launcher-settings.json" "%OUT%\launcher-settings.json" >nul
+)
+
 if exist "%ROOT%assets" (
     xcopy /E /I /Y "%ROOT%assets" "%OUT%\assets" >nul
 )
@@ -134,6 +143,15 @@ if exist "%ROOT%com.funkinmoon" (
 
 if exist "%ROOT%mods" (
     xcopy /E /I /Y "%ROOT%mods" "%OUT%\mods" >nul
+)
+
+if exist "%ISCC%" (
+    echo.
+    echo [4/4] Criando instalador Setup...
+    "%ISCC%" ".\setup.iss"
+    if errorlevel 1 goto ERROR
+) else (
+    echo [AVISO] Inno Setup nao encontrado; Setup nao foi gerado.
 )
 
 if exist "%ROOT%\app.res" del /f /q "%ROOT%\app.res"

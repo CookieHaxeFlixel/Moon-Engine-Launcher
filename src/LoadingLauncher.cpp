@@ -1,14 +1,24 @@
 #include "LoadingLauncher.hpp"
 
 #include "project.hpp"
+#include "third_party/miniz/miniz.h"
 
 #include <SFML/Graphics.hpp>
 
+#if defined(_WIN32)
+#include <winsock2.h>
+#include <windows.h>
+#endif
+
 #include <curl/curl.h>
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cctype>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -16,6 +26,62 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <vector>
+#if defined(_WIN32)
+namespace
+{
+    bool consoleEnabledBySettings()
+    {
+        std::ifstream settingsFile(
+            launcherDirectory() / "launcher-settings.json"
+        );
+
+        if (!settingsFile)
+            return false;
+
+        const std::string json{
+            std::istreambuf_iterator<char>(settingsFile),
+            std::istreambuf_iterator<char>()
+        };
+
+        const size_t keyPosition = json.find("\"showConsole\"");
+        if (keyPosition == std::string::npos)
+            return false;
+
+        const size_t colonPosition = json.find(':', keyPosition);
+        if (colonPosition == std::string::npos)
+            return false;
+
+        const size_t valuePosition = json.find_first_not_of(
+            " \t\r\n",
+            colonPosition + 1
+        );
+
+        return
+            valuePosition != std::string::npos &&
+            json.compare(valuePosition, 4, "true") == 0;
+    }
+
+    void configureLauncherConsole()
+    {
+        if (!consoleEnabledBySettings())
+            return;
+
+        if (!GetConsoleWindow() && !AllocConsole())
+            return;
+
+        std::freopen("CONIN$", "r", stdin);
+        std::freopen("CONOUT$", "w", stdout);
+        std::freopen("CONOUT$", "w", stderr);
+        SetConsoleOutputCP(CP_UTF8);
+        SetConsoleCP(CP_UTF8);
+        std::ios::sync_with_stdio(true);
+        std::cout.clear();
+        std::cerr.clear();
+    }
+}
+#endif
+
 
 extern void runLauncher();
 
@@ -64,6 +130,9 @@ namespace
         output->append(
             static_cast<char*>(contents),
             total
+#if defined(_WIN32)
+    configureLauncherConsole();
+#endif
         );
 
         return total;
@@ -281,11 +350,121 @@ namespace
     struct UpdateInfo
     {
         bool available = false;
+        bool packageArchive = false;
 
         std::string version;
 
         std::string downloadUrl;
     };
+
+
+    std::array<unsigned int, 3> versionParts(std::string version)
+    {
+        if (!version.empty() && (version.front() == 'v' || version.front() == 'V'))
+            version.erase(version.begin());
+
+        std::array<unsigned int, 3> parts{};
+        size_t position = 0;
+
+        for (size_t partIndex = 0; partIndex < parts.size(); ++partIndex)
+        {
+            while (position < version.size() && !std::isdigit(static_cast<unsigned char>(version[position])))
+                ++position;
+
+            if (position == version.size())
+                break;
+
+            unsigned int value = 0;
+            while (position < version.size() && std::isdigit(static_cast<unsigned char>(version[position])))
+            {
+                value = value * 10 + static_cast<unsigned int>(version[position] - '0');
+                ++position;
+            }
+
+            parts[partIndex] = value;
+
+            if (position < version.size() && version[position] == '.')
+                ++position;
+            else
+                break;
+        }
+
+        return parts;
+    }
+
+
+    bool isNewerVersion(
+        const std::string& candidate,
+        const std::string& current
+    )
+    {
+        return versionParts(candidate) > versionParts(current);
+    }
+
+
+    std::vector<std::string> extractJsonArrayObjects(
+        const std::string& json,
+        const std::string& key
+    )
+    {
+        std::vector<std::string> objects;
+        const size_t keyPosition = json.find("\"" + key + "\"");
+        if (keyPosition == std::string::npos)
+            return objects;
+
+        const size_t arrayStart = json.find('[', keyPosition);
+        if (arrayStart == std::string::npos)
+            return objects;
+
+        size_t objectStart = std::string::npos;
+        int objectDepth = 0;
+        bool inString = false;
+        bool escaped = false;
+
+        for (size_t index = arrayStart + 1; index < json.size(); ++index)
+        {
+            const char character = json[index];
+
+            if (inString)
+            {
+                if (escaped)
+                    escaped = false;
+                else if (character == '\\')
+                    escaped = true;
+                else if (character == '"')
+                    inString = false;
+                continue;
+            }
+
+            if (character == '"')
+            {
+                inString = true;
+            }
+            else if (character == '{')
+            {
+                if (objectDepth == 0)
+                    objectStart = index;
+                ++objectDepth;
+            }
+            else if (character == '}')
+            {
+                --objectDepth;
+                if (objectDepth == 0 && objectStart != std::string::npos)
+                {
+                    objects.push_back(
+                        json.substr(objectStart, index - objectStart + 1)
+                    );
+                    objectStart = std::string::npos;
+                }
+            }
+            else if (character == ']' && objectDepth == 0)
+            {
+                break;
+            }
+        }
+
+        return objects;
+    }
 
 
     // ============================================================
@@ -337,86 +516,58 @@ namespace
         // Already up to date
         // --------------------------------------------------------
 
-        if (
-            latestVersion ==
-            Project::VERSION
-        )
+        if (!isNewerVersion(latestVersion, Project::VERSION))
         {
             return result;
         }
 
+        std::string exeAssetUrl;
+        std::string packageAssetUrl;
 
-        // --------------------------------------------------------
-        // Find executable asset
-        // --------------------------------------------------------
+        for (const std::string& asset : extractJsonArrayObjects(response, "assets"))
+        {
+            const std::string assetName = extractJsonString(asset, "name");
+            const std::string assetUrl = extractJsonString(asset, "browser_download_url");
 
-        const std::string assetName =
-            Project::EXECUTABLE_NAME;
+            if (assetUrl.empty())
+                continue;
 
-        const std::string assetSearch =
-            "\"name\":\"" +
-            assetName +
-            "\"";
+            if (assetName == Project::EXECUTABLE_NAME)
+                exeAssetUrl = assetUrl;
 
-        const size_t assetPosition =
-            response.find(
-                assetSearch
+            std::string lowerName = assetName;
+            std::transform(
+                lowerName.begin(),
+                lowerName.end(),
+                lowerName.begin(),
+                [](unsigned char value) {
+                    return static_cast<char>(std::tolower(value));
+                }
             );
 
-        if (
-            assetPosition ==
-            std::string::npos
-        )
+            if (
+                lowerName.find("moon-launcher") != std::string::npos &&
+                lowerName.size() >= 4 &&
+                lowerName.substr(lowerName.size() - 4) == ".zip"
+            )
+                packageAssetUrl = assetUrl;
+        }
+
+        if (!packageAssetUrl.empty())
+        {
+            result.downloadUrl = packageAssetUrl;
+            result.packageArchive = true;
+        }
+        else if (!exeAssetUrl.empty())
+        {
+            result.downloadUrl = exeAssetUrl;
+        }
+        else
         {
             std::cerr
-                << "[LoadingLauncher] "
-                << "Launcher executable asset "
-                << "was not found in the release.\n";
-
+                << "[LoadingLauncher] No launcher ZIP or EXE asset in release.\n";
             return result;
         }
-
-
-        const std::string urlKey =
-            "\"browser_download_url\":\"";
-
-        const size_t urlPosition =
-            response.find(
-                urlKey,
-                assetPosition
-            );
-
-        if (
-            urlPosition ==
-            std::string::npos
-        )
-        {
-            return result;
-        }
-
-        const size_t urlStart =
-            urlPosition +
-            urlKey.size();
-
-        const size_t urlEnd =
-            response.find(
-                '"',
-                urlStart
-            );
-
-        if (
-            urlEnd ==
-            std::string::npos
-        )
-        {
-            return result;
-        }
-
-        result.downloadUrl =
-            response.substr(
-                urlStart,
-                urlEnd - urlStart
-            );
 
         result.available =
             !result.downloadUrl.empty();
@@ -538,6 +689,13 @@ namespace
         const CURLcode code =
             curl_easy_perform(curl);
 
+        long responseCode = 0;
+        curl_easy_getinfo(
+            curl,
+            CURLINFO_RESPONSE_CODE,
+            &responseCode
+        );
+
 
         curl_easy_cleanup(curl);
 
@@ -545,13 +703,189 @@ namespace
 
 
         downloadSuccess.store(
-            code == CURLE_OK
+            code == CURLE_OK &&
+            responseCode >= 200 &&
+            responseCode < 300 &&
+            fs::exists(output) &&
+            fs::file_size(output) > 0
         );
 
         downloadFinished.store(
             true
         );
     }
+
+
+#if defined(_WIN32)
+    fs::path launcherDirectory()
+    {
+        std::wstring executablePath(MAX_PATH, L'\0');
+        const DWORD length = GetModuleFileNameW(
+            nullptr,
+            executablePath.data(),
+            static_cast<DWORD>(executablePath.size())
+        );
+
+        if (length == 0 || length >= executablePath.size())
+            return fs::current_path();
+
+        executablePath.resize(length);
+        return fs::path(executablePath).parent_path();
+    }
+
+
+    bool extractReleasePackage(
+        const fs::path& archivePath,
+        const fs::path& destination
+    )
+    {
+        mz_zip_archive archive{};
+        if (!mz_zip_reader_init_file(&archive, archivePath.string().c_str(), 0))
+            return false;
+
+        bool success = true;
+        const fs::path normalizedRoot = destination.lexically_normal();
+
+        const int fileCount = static_cast<int>(
+            mz_zip_reader_get_num_files(&archive)
+        );
+
+        for (int index = 0; index < fileCount; ++index)
+        {
+            mz_zip_archive_file_stat fileStat{};
+            if (!mz_zip_reader_file_stat(&archive, index, &fileStat))
+            {
+                success = false;
+                continue;
+            }
+
+            const fs::path relativePath =
+                fs::u8path(fileStat.m_filename).lexically_normal();
+
+            if (relativePath.empty() || relativePath.is_absolute())
+            {
+                success = false;
+                continue;
+            }
+
+            bool unsafePath = false;
+            for (const fs::path& component : relativePath)
+            {
+                if (component == ".." || component == ".")
+                    unsafePath = true;
+            }
+
+            const fs::path outputPath =
+                (normalizedRoot / relativePath).lexically_normal();
+            const fs::path checkPath =
+                outputPath.lexically_relative(normalizedRoot);
+
+            if (
+                unsafePath ||
+                checkPath.empty() ||
+                checkPath.is_absolute() ||
+                *checkPath.begin() == ".."
+            )
+            {
+                success = false;
+                continue;
+            }
+
+            std::error_code error;
+            if (mz_zip_reader_is_file_a_directory(&archive, index))
+            {
+                fs::create_directories(outputPath, error);
+                if (error)
+                    success = false;
+                continue;
+            }
+
+            fs::create_directories(outputPath.parent_path(), error);
+            if (
+                error ||
+                !mz_zip_reader_extract_to_file(
+                    &archive,
+                    index,
+                    outputPath.string().c_str(),
+                    0
+                )
+            )
+                success = false;
+        }
+
+        mz_zip_reader_end(&archive);
+        return success;
+    }
+
+
+    fs::path findLauncherBin(const fs::path& extractedRoot)
+    {
+        std::error_code error;
+        for (
+            fs::recursive_directory_iterator iterator(
+                extractedRoot,
+                fs::directory_options::skip_permission_denied,
+                error
+            ),
+            end;
+            iterator != end && !error;
+            iterator.increment(error)
+        )
+        {
+            if (
+                iterator->is_regular_file(error) &&
+                iterator->path().filename() == Project::EXECUTABLE_NAME
+            )
+                return iterator->path().parent_path();
+        }
+
+        return {};
+    }
+
+
+    bool startUpdater(
+        const fs::path& stagedBin,
+        const fs::path& installDirectory
+    )
+    {
+        const fs::path updaterPath =
+            stagedBin / "LauncherUpdater.exe";
+        const fs::path launcherPath =
+            installDirectory / Project::EXECUTABLE_NAME;
+
+        if (!fs::exists(updaterPath) || !fs::exists(launcherPath))
+            return false;
+
+        std::wstring commandLine =
+            L"\"" + updaterPath.wstring() + L"\" " +
+            std::to_wstring(GetCurrentProcessId()) + L" \"" +
+            stagedBin.wstring() + L"\" \"" +
+            installDirectory.wstring() + L"\" \"" +
+            launcherPath.wstring() + L"\"";
+
+        STARTUPINFOW startupInfo{};
+        startupInfo.cb = sizeof(startupInfo);
+        PROCESS_INFORMATION processInfo{};
+
+        if (!CreateProcessW(
+                updaterPath.c_str(),
+                commandLine.data(),
+                nullptr,
+                nullptr,
+                FALSE,
+                CREATE_NO_WINDOW,
+                nullptr,
+                installDirectory.c_str(),
+                &startupInfo,
+                &processInfo
+            ))
+            return false;
+
+        CloseHandle(processInfo.hThread);
+        CloseHandle(processInfo.hProcess);
+        return true;
+    }
+#endif
 
 
     // ============================================================
@@ -904,9 +1238,29 @@ namespace LoadingLauncher
             );
 
 
-            const fs::path updatePath =
-                fs::current_path() /
-                "Moon Launcher.new.exe";
+            std::string versionSlug = update.version;
+            for (char& character : versionSlug)
+            {
+                if (
+                    !std::isalnum(static_cast<unsigned char>(character)) &&
+                    character != '.' &&
+                    character != '-'
+                )
+                    character = '_';
+            }
+
+            const fs::path updateRoot =
+                fs::temp_directory_path() /
+                ("MoonLauncherUpdate-" + versionSlug);
+
+            std::error_code cleanupError;
+            fs::remove_all(updateRoot, cleanupError);
+            fs::create_directories(updateRoot);
+
+            const fs::path updatePath = updateRoot /
+                (update.packageArchive
+                    ? "launcher-package.zip"
+                    : "Moon Launcher.new.exe");
 
 
             std::thread downloadThread(
@@ -1017,13 +1371,88 @@ namespace LoadingLauncher
                 downloadSuccess.load()
             )
             {
-                progressBar.setSize({
-                    BAR_WIDTH,
-                    BAR_HEIGHT
-                });
+                bool packageReady = true;
+                fs::path stagedBin;
+
+                if (update.packageArchive)
+                {
+                    const fs::path extractedRoot = updateRoot / "package";
+                    packageReady = extractReleasePackage(updatePath, extractedRoot);
+                    if (packageReady)
+                        stagedBin = findLauncherBin(extractedRoot);
+                }
+                else
+                {
+                    stagedBin = updateRoot / "bin";
+                    std::error_code error;
+                    fs::create_directories(stagedBin, error);
+                    if (!error)
+                    {
+                        fs::copy_file(
+                            updatePath,
+                            stagedBin / Project::EXECUTABLE_NAME,
+                            fs::copy_options::overwrite_existing,
+                            error
+                        );
+                    }
+                    packageReady = !error;
+                }
+
+                if (
+                    stagedBin.empty() ||
+                    !fs::exists(stagedBin / Project::EXECUTABLE_NAME)
+                )
+                    packageReady = false;
+
+                if (packageReady) {
+                    const fs::path stagedUpdater =
+                        stagedBin / "LauncherUpdater.exe";
+                    const fs::path installedUpdater =
+                        launcherDirectory() / "LauncherUpdater.exe";
+
+                    if (
+                        !fs::exists(stagedUpdater) &&
+                        fs::exists(installedUpdater)
+                    ) {
+                        std::error_code copyError;
+                        fs::copy_file(
+                            installedUpdater,
+                            stagedUpdater,
+                            fs::copy_options::overwrite_existing,
+                            copyError
+                        );
+                    }
+
+                    packageReady = fs::exists(stagedUpdater);
+                }
+
+                if (
+                    packageReady &&
+                    startUpdater(stagedBin, launcherDirectory())
+                )
+                {
+                    status.setString("Instalando atualização e reiniciando...");
+                    centerText(
+                        status,
+                        Project::LOADING_WIDTH / 2.0f,
+                        205.0f
+                    );
+                    window.clear(sf::Color(10, 10, 14));
+                    window.draw(background);
+                    if (moonLoaded)
+                        window.draw(moon);
+                    window.draw(title);
+                    window.draw(version);
+                    window.draw(status);
+                    window.display();
+
+                    curl_global_cleanup();
+                    window.close();
+                    return;
+                }
 
                 status.setString(
-                    "Atualização concluída."
+                    "Pacote baixado, mas nao foi possivel instalar."
                 );
 
                 centerText(
@@ -1032,53 +1461,18 @@ namespace LoadingLauncher
                     205.0f
                 );
 
-                window.clear(
-                    sf::Color(
-                        10,
-                        10,
-                        14
-                    )
-                );
+                std::cerr
+                    << "[LoadingLauncher] Update package could not be staged or updater was not started.\n";
 
+                window.clear(sf::Color(10, 10, 14));
                 window.draw(background);
-
                 if (moonLoaded)
                     window.draw(moon);
-
                 window.draw(title);
                 window.draw(version);
                 window.draw(status);
-                window.draw(progressBackground);
-                window.draw(progressBar);
-
                 window.display();
-
-                std::this_thread::sleep_for(
-                    std::chrono::milliseconds(
-                        500
-                    )
-                );
-
-                /*
-                 * IMPORTANTE:
-                 *
-                 * Aqui entra o updater separado.
-                 *
-                 * O Windows não permite substituir
-                 * o .exe que está atualmente executando.
-                 *
-                 * Então:
-                 *
-                 * Moon Launcher.exe
-                 *        ↓
-                 * LauncherUpdater.exe
-                 *        ↓
-                 * fecha Moon Launcher
-                 *        ↓
-                 * substitui o .exe
-                 *        ↓
-                 * abre Moon Launcher novamente
-                 */
+                std::this_thread::sleep_for(std::chrono::seconds(2));
             }
             else
             {
@@ -1238,12 +1632,63 @@ namespace LoadingLauncher
 }
 
 
+#if defined(_WIN32)
+void configureConsoleFromSettings()
+{
+    const fs::path settingsPath =
+        launcherDirectory() / "launcher-settings.json";
+    std::ifstream settingsFile(settingsPath);
+
+    if (!settingsFile)
+        return;
+
+    const std::string json{
+        std::istreambuf_iterator<char>(settingsFile),
+        std::istreambuf_iterator<char>()
+    };
+
+    const size_t keyPosition = json.find("\"showConsole\"");
+    if (keyPosition == std::string::npos)
+        return;
+
+    const size_t colonPosition = json.find(':', keyPosition);
+    if (colonPosition == std::string::npos)
+        return;
+
+    const size_t valuePosition = json.find_first_not_of(
+        " \t\r\n",
+        colonPosition + 1
+    );
+
+    if (
+        valuePosition == std::string::npos ||
+        json.compare(valuePosition, 4, "true") != 0
+    )
+        return;
+
+    if (!GetConsoleWindow() && !AllocConsole())
+        return;
+
+    freopen("CONIN$", "r", stdin);
+    freopen("CONOUT$", "w", stdout);
+    freopen("CONOUT$", "w", stderr);
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+    std::ios::sync_with_stdio(true);
+}
+#endif
+
+
 // ================================================================
 // Executable entry point
 // ================================================================
 
 int main()
 {
+#if defined(_WIN32)
+    configureConsoleFromSettings();
+#endif
+
     LoadingLauncher::run();
 
     return 0;
