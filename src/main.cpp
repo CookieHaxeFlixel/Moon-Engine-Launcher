@@ -1,5 +1,7 @@
 #include <SFML/Graphics.hpp>
+#include <SFML/Audio.hpp>
 #include <SFML/System/FileInputStream.hpp>
+#include <SFML/Window/Clipboard.hpp>
 #include <curl/curl.h>
 
 #include <cstdlib>
@@ -13,6 +15,8 @@
 #include <mutex>
 #include <atomic>
 #include <cstring>
+#include <cstdint>
+#include <array>
 #include <vector>
 #include <algorithm>
 #include <iostream>
@@ -21,6 +25,7 @@
 
 #include <winsock2.h>
 #include <windows.h>
+#include <shellapi.h>
 #include <bcrypt.h>
 
 #elif defined(__ANDROID__)
@@ -32,6 +37,8 @@
 #endif
 
 #include "third_party/miniz/miniz.h"
+#include "project.hpp"
+#include "ModRuntime.hpp"
 
 namespace fs = std::filesystem;
 
@@ -1031,7 +1038,11 @@ std::string SAVE_FILE_() {
 }
 
 std::string MODS_PATH_() {
+#if defined(_WIN32)
+    return exeDir() + "mods/";
+#else
     return BASE_PATH_() + "mods/";
+#endif
 }
 
 std::string MODS_STATE_FILE_() {
@@ -1046,19 +1057,19 @@ const std::string A_HOME = A_UI + "home/";
 const std::string A_LOGIN = A_UI + "login/";
 const std::string A_LOADING = A_UI + "loading/";
 const std::string A_NEWS = A_UI + "news/docs/";
-const std::string A_FONTS = A_UI + "fonts/";
+const std::string A_FONTS = "assets/ui/fonts/";
 
 const std::string A_ICON =
-    "assets/app/icons/icon-moon.png";
+    "assets/app/icons/iconMoon-256x256.png";
 
 
 struct ProgressData {
     double downloaded = 0;
     double total = 0;
-    double speed = 0;
 };
 
 ProgressData progressData;
+std::mutex progressDataMutex;
 
 
 struct Version {
@@ -1078,6 +1089,29 @@ struct UserData {
 };
 
 UserData currentUser;
+ModRuntime modRuntime;
+sf::Music launcherMusic;
+
+
+void startLauncherMusic() {
+    const std::array<std::string, 2> candidates = {
+        A_HOME + "launcher-gay-song.ogg",
+        A_HOME + "Launcher Gay Song.ogg"
+    };
+
+    for (const std::string& path : candidates) {
+        if (!launcherMusic.openFromFile(path))
+            continue;
+
+        launcherMusic.setLooping(true);
+        launcherMusic.setVolume(30.f);
+        launcherMusic.play();
+        std::cout << "[AUDIO] Looping launcher music: " << path << '\n';
+        return;
+    }
+
+    std::cerr << "[AUDIO] Could not open launcher-gay-song.ogg\n";
+}
 
 
 size_t writeFileCb(
@@ -1092,19 +1126,16 @@ size_t writeFileCb(
 
 int progressCb(
     void* p,
-    curl_off_t* dlt,
-    curl_off_t* dln,
-    curl_off_t*,
-    curl_off_t*
+    curl_off_t totalDownload,
+    curl_off_t downloaded,
+    curl_off_t,
+    curl_off_t
 ) {
     auto* d = (ProgressData*)p;
 
-    /*
-     * dlt e dln são ponteiros.
-     * Precisamos desreferenciar os valores.
-     */
-    d->downloaded = (double)(*dln);
-    d->total = (double)(*dlt);
+    std::lock_guard<std::mutex> lock(progressDataMutex);
+    d->downloaded = static_cast<double>(downloaded);
+    d->total = static_cast<double>(totalDownload);
 
     return 0;
 }
@@ -2148,6 +2179,76 @@ void saveModsState(
 }
 
 
+void reloadEnabledLuaMods() {
+    modRuntime.setTraceFile(
+        fs::path(SAVES_PATH_()) / "mod-runtime.log"
+    );
+    modRuntime.trace(
+        "Scanning enabled mods in " + MODS_PATH_()
+    );
+
+    std::vector<LuaModDescriptor> descriptors;
+
+    for (const ModEntry& mod : loadMods()) {
+        if (!mod.enabled) {
+            modRuntime.trace(
+                "Mod is disabled; enable it in the Mods screen: " +
+                mod.folder
+            );
+            continue;
+        }
+
+        const fs::path modDirectory =
+            fs::path(MODS_PATH_()) / mod.folder;
+        const std::string metadata = readTextFile(
+            (modDirectory / "mod-metadata.json").string()
+        );
+
+        if (metadata.empty()) {
+            std::cerr << "[Mods] Missing mod-metadata.json: "
+                      << mod.folder << '\n';
+            modRuntime.trace(
+                "Missing mod-metadata.json: " + mod.folder
+            );
+            continue;
+        }
+
+        if (extractJsonString(metadata, "language") != "lua") {
+            modRuntime.trace(
+                "Skipping non-Lua mod: " + mod.folder
+            );
+            continue;
+        }
+
+        LuaModDescriptor descriptor;
+        descriptor.id = extractJsonString(metadata, "id");
+        descriptor.name = extractJsonString(metadata, "name");
+        descriptor.currentLauncherVersion = Project::VERSION;
+        descriptor.launcherMinVersion =
+            extractJsonString(metadata, "minVersion");
+        descriptor.directory = modDirectory;
+        descriptor.entry = extractJsonString(metadata, "entry");
+
+        if (descriptor.id.empty() || descriptor.entry.empty()) {
+            std::cerr << "[Mods] Invalid Lua metadata: "
+                      << mod.folder << '\n';
+            modRuntime.trace(
+                "Invalid Lua metadata: " + mod.folder
+            );
+            continue;
+        }
+
+        modRuntime.trace(
+            "Enabled Lua mod " + descriptor.id +
+            " entry=" + descriptor.entry
+        );
+        descriptors.push_back(std::move(descriptor));
+    }
+
+    modRuntime.loadEnabledMods(descriptors);
+}
+
+
 #if defined(_WIN32)
 
 std::string resolveExePath(
@@ -2222,12 +2323,15 @@ void launchVersion(
     if (!fs::exists(exePath))
         return;
 
+    const float previousMusicVolume = launcherMusic.getVolume();
+    launcherMusic.setVolume(0.f);
     window.setVisible(false);
 
     system(
         ("\"" + exePath + "\"").c_str()
     );
 
+    launcherMusic.setVolume(previousMusicVolume);
     window.setVisible(true);
 }
 
@@ -2573,10 +2677,11 @@ sf::Texture makeCircleTexture(
 ) {
     sf::RenderTexture rt;
 
-    rt.resize({
-        size,
-        size
-    });
+    if (!rt.resize({
+            size,
+            size
+        }))
+        return sf::Texture{};
 
     rt.clear(
         sf::Color::Transparent
@@ -2651,6 +2756,399 @@ sf::Texture makeCircleTexture(
     rt.display();
 
     return rt.getTexture();
+}
+
+static std::string utf8AppendCodePoint(
+    const std::string& text,
+    uint32_t codepoint
+) {
+    std::string out = text;
+
+    if (codepoint <= 0x7F) {
+        out.push_back((char)codepoint);
+        return out;
+    }
+
+    if (codepoint <= 0x7FF) {
+        out.push_back((char)(0xC0 | ((codepoint >> 6) & 0x1F)));
+        out.push_back((char)(0x80 | (codepoint & 0x3F)));
+        return out;
+    }
+
+    if (codepoint <= 0xFFFF) {
+        out.push_back((char)(0xE0 | ((codepoint >> 12) & 0x0F)));
+        out.push_back((char)(0x80 | ((codepoint >> 6) & 0x3F)));
+        out.push_back((char)(0x80 | (codepoint & 0x3F)));
+        return out;
+    }
+
+    out.push_back((char)(0xF0 | ((codepoint >> 18) & 0x07)));
+    out.push_back((char)(0x80 | ((codepoint >> 12) & 0x3F)));
+    out.push_back((char)(0x80 | ((codepoint >> 6) & 0x3F)));
+    out.push_back((char)(0x80 | (codepoint & 0x3F)));
+
+    return out;
+}
+
+static void eraseLastUtf8(
+    std::string& text
+) {
+    if (text.empty())
+        return;
+
+    size_t i = text.size() - 1;
+
+    while (i > 0 && (text[i] & 0xC0u) == 0x80u)
+        i--;
+
+    text.erase(i);
+}
+
+static bool isEmojiCodePoint(
+    uint32_t cp
+) {
+    return
+        (cp >= 0x1F300 && cp <= 0x1FAFF) ||
+        (cp >= 0x2600 && cp <= 0x27BF) ||
+        cp == 0x2764 ||
+        cp == 0x2B50 ||
+        cp == 0x23F0 ||
+        cp == 0x260E ||
+        cp == 0x2705 ||
+        cp == 0x2728;
+}
+
+static bool loadEmojiFont(
+    sf::Font& font
+) {
+    static const std::vector<std::string> candidates = {
+        "C:/Windows/Fonts/seguiemj.ttf",
+        "C:/Windows/Fonts/Segoe UI Emoji.ttf",
+        "C:/Windows/Fonts/NotoColorEmoji.ttf",
+        "C:/Windows/Fonts/emoji.ttf",
+        "C:/Windows/Fonts/Arial.ttf"
+    };
+
+    for (const auto& path : candidates) {
+        if (font.openFromFile(path))
+            return true;
+    }
+
+    return false;
+}
+
+static void drawEmojiAwareText(
+    sf::RenderTarget& target,
+    const std::string& text,
+    const sf::Font& baseFont,
+    const sf::Font* emojiFont,
+    unsigned int charSize,
+    const sf::Color& color,
+    float x,
+    float y
+) {
+    std::u32string codepoints;
+
+    for (size_t i = 0; i < text.size();) {
+        unsigned char ch = static_cast<unsigned char>(text[i]);
+        uint32_t cp = 0;
+
+        if (ch <= 0x7F) {
+            cp = ch;
+            i += 1;
+        } else if ((ch & 0xE0u) == 0xC0u && i + 1 < text.size()) {
+            cp = ((ch & 0x1Fu) << 6) | (text[i + 1] & 0x3Fu);
+            i += 2;
+        } else if ((ch & 0xF0u) == 0xE0u && i + 2 < text.size()) {
+            cp = ((ch & 0x0Fu) << 12) |
+                 ((text[i + 1] & 0x3Fu) << 6) |
+                 (text[i + 2] & 0x3Fu);
+            i += 3;
+        } else if ((ch & 0xF8u) == 0xF0u && i + 3 < text.size()) {
+            cp = ((ch & 0x07u) << 18) |
+                 ((text[i + 1] & 0x3Fu) << 12) |
+                 ((text[i + 2] & 0x3Fu) << 6) |
+                 (text[i + 3] & 0x3Fu);
+            i += 4;
+        } else {
+            cp = 0xFFFD;
+            i += 1;
+        }
+
+        codepoints.push_back((char32_t)cp);
+    }
+
+    float cursorX = x;
+
+    for (uint32_t cp : codepoints) {
+        sf::Text glyph(
+            (emojiFont && isEmojiCodePoint(cp)) ? *emojiFont : baseFont,
+            sf::String(static_cast<char32_t>(cp)),
+            charSize
+        );
+
+        glyph.setFillColor(color);
+        glyph.setPosition({cursorX, y});
+        target.draw(glyph);
+        cursorX += glyph.getLocalBounds().size.x + 2.f;
+    }
+}
+
+static bool chooseDisplayNameScreen(
+    sf::RenderWindow& window,
+    sf::Font& fontTitle,
+    sf::Font& fontText,
+    sf::Font& fontMono,
+    const sf::Font* emojiFont
+) {
+    std::string draft;
+    bool inputFocused = true;
+    bool selectedAll = false;
+    sf::Clock caretClock;
+    window.requestFocus();
+
+    sf::Texture bgTex;
+    bool hasBg = bgTex.loadFromFile(A_LOGIN + "loginBackCard.png");
+
+    sf::Sprite bg(bgTex);
+
+    if (hasBg) {
+        auto sz = bgTex.getSize();
+        bg.setScale({
+            (float)WIN_W / (float)sz.x,
+            (float)WIN_H / (float)sz.y
+        });
+    }
+
+    sf::RectangleShape panel(
+        {460.f, 220.f}
+    );
+    panel.setPosition({
+        (float)WIN_W / 2.f - 230.f,
+        (float)WIN_H / 2.f - 110.f
+    });
+    panel.setFillColor(sf::Color(18, 18, 28, 220));
+
+    sf::RectangleShape inputBox(
+        {360.f, 54.f}
+    );
+    inputBox.setPosition({
+        (float)WIN_W / 2.f - 180.f,
+        (float)WIN_H / 2.f + 6.f
+    });
+    inputBox.setFillColor(sf::Color(35, 35, 45));
+    inputBox.setOutlineColor(sf::Color(140, 140, 220));
+    inputBox.setOutlineThickness(2.f);
+
+    sf::RectangleShape continueBtn(
+        {150.f, 46.f}
+    );
+    continueBtn.setPosition({
+        (float)WIN_W / 2.f - 75.f,
+        (float)WIN_H / 2.f + 86.f
+    });
+    continueBtn.setFillColor(sf::Color(120, 90, 220));
+
+    sf::Text title(fontTitle, "Escolha seu nome", 28);
+    title.setFillColor(sf::Color::White);
+    title.setPosition({
+        (float)WIN_W / 2.f - title.getLocalBounds().size.x / 2.f,
+        (float)WIN_H / 2.f - 70.f
+    });
+
+    sf::Text hint(fontText, "Use emoji e símbolos do seu jeito.", 16);
+    hint.setFillColor(sf::Color(200, 200, 220));
+    hint.setPosition({
+        (float)WIN_W / 2.f - hint.getLocalBounds().size.x / 2.f,
+        (float)WIN_H / 2.f - 30.f
+    });
+
+    auto drawDraft = [&]() {
+        sf::Text value(
+            fontMono,
+            sf::String::fromUtf8(draft.begin(), draft.end()),
+            20
+        );
+        value.setFillColor(sf::Color::White);
+        value.setPosition({
+            inputBox.getPosition().x + 18.f,
+            inputBox.getPosition().y + 12.f
+        });
+
+        if (emojiFont != nullptr)
+            drawEmojiAwareText(
+                window,
+                draft,
+                fontMono,
+                emojiFont,
+                20,
+                sf::Color::White,
+                inputBox.getPosition().x + 18.f,
+                inputBox.getPosition().y + 12.f
+            );
+        else
+            window.draw(value);
+    };
+
+    while (window.isOpen()) {
+        sf::Vector2f mouse(sf::Mouse::getPosition(window));
+
+        bool hoverContinue =
+            mouse.x >= continueBtn.getPosition().x &&
+            mouse.x <= continueBtn.getPosition().x + continueBtn.getSize().x &&
+            mouse.y >= continueBtn.getPosition().y &&
+            mouse.y <= continueBtn.getPosition().y + continueBtn.getSize().y;
+
+        bool hoverInput =
+            mouse.x >= inputBox.getPosition().x &&
+            mouse.x <= inputBox.getPosition().x + inputBox.getSize().x &&
+            mouse.y >= inputBox.getPosition().y &&
+            mouse.y <= inputBox.getPosition().y + inputBox.getSize().y;
+
+        while (const std::optional ev = window.pollEvent()) {
+            if (ev->is<sf::Event::Closed>()) {
+                window.close();
+                return false;
+            }
+
+            if (const auto* key = ev->getIf<sf::Event::KeyPressed>()) {
+                if (key->code == sf::Keyboard::Key::Escape) {
+                    currentUser.name = draft;
+                    saveUser();
+                    return true;
+                }
+
+                if (key->code == sf::Keyboard::Key::Enter) {
+                    if (!draft.empty()) {
+                        currentUser.name = draft;
+                        saveUser();
+                        return true;
+                    }
+                }
+
+                if (inputFocused && key->control) {
+                    if (key->code == sf::Keyboard::Key::A) {
+                        selectedAll = !draft.empty();
+                    } else if (key->code == sf::Keyboard::Key::C) {
+                        sf::Clipboard::setString(
+                            sf::String::fromUtf8(
+                                draft.begin(),
+                                draft.end()
+                            )
+                        );
+                    } else if (key->code == sf::Keyboard::Key::V) {
+                        const auto clipboardText =
+                            sf::Clipboard::getString().toUtf8();
+
+                        if (selectedAll)
+                            draft.clear();
+
+                        draft.append(
+                            clipboardText.begin(),
+                            clipboardText.end()
+                        );
+
+                        selectedAll = false;
+                    }
+                } else if (inputFocused && key->code == sf::Keyboard::Key::Backspace) {
+                    if (selectedAll)
+                        draft.clear();
+                    else
+                        eraseLastUtf8(draft);
+
+                    selectedAll = false;
+                }
+            }
+
+            if (const auto* text = ev->getIf<sf::Event::TextEntered>()) {
+                uint32_t code = text->unicode;
+
+                if (
+                    inputFocused &&
+                    code >= 32 &&
+                    code != 127 &&
+                    !(code >= 0xD800 && code <= 0xDFFF)
+                ) {
+                    if (selectedAll)
+                        draft.clear();
+
+                    draft = utf8AppendCodePoint(draft, code);
+                    selectedAll = false;
+                }
+            }
+
+            if (ev->is<sf::Event::MouseButtonPressed>()) {
+                inputFocused = hoverInput;
+
+                if (hoverContinue && !draft.empty()) {
+                    currentUser.name = draft;
+                    saveUser();
+                    return true;
+                }
+            }
+        }
+
+        window.clear(sf::Color(10, 15, 40));
+
+        if (hasBg)
+            window.draw(bg);
+
+        window.draw(panel);
+        window.draw(title);
+        window.draw(hint);
+        window.draw(inputBox);
+
+        const float textX = inputBox.getPosition().x + 18.f;
+        const float textY = inputBox.getPosition().y + 12.f;
+        sf::Text measuredText(
+            fontMono,
+            sf::String::fromUtf8(draft.begin(), draft.end()),
+            20
+        );
+        const float textWidth = measuredText.getLocalBounds().size.x;
+
+        if (selectedAll && textWidth > 0.f) {
+            sf::RectangleShape selection({
+                std::min(textWidth + 2.f, inputBox.getSize().x - 36.f),
+                28.f
+            });
+            selection.setPosition({textX - 1.f, textY - 1.f});
+            selection.setFillColor(sf::Color(70, 100, 180, 190));
+            window.draw(selection);
+        }
+
+        drawDraft();
+
+        if (inputFocused && std::fmod(caretClock.getElapsedTime().asSeconds(), 1.f) < 0.5f) {
+            sf::RectangleShape caret({2.f, 24.f});
+            caret.setPosition({
+                textX + std::min(textWidth, inputBox.getSize().x - 38.f),
+                textY
+            });
+            caret.setFillColor(sf::Color::White);
+            window.draw(caret);
+        }
+
+        sf::Text btnText(fontTitle, "Continuar", 20);
+        btnText.setFillColor(sf::Color::White);
+        btnText.setPosition({
+            continueBtn.getPosition().x + (continueBtn.getSize().x - btnText.getLocalBounds().size.x) / 2.f,
+            continueBtn.getPosition().y + 10.f
+        });
+
+        continueBtn.setFillColor(
+            hoverContinue
+                ? sf::Color(150, 120, 250)
+                : sf::Color(120, 90, 220)
+        );
+
+        window.draw(continueBtn);
+        window.draw(btnText);
+
+        window.display();
+    }
+
+    return false;
 }
 
 
@@ -2745,13 +3243,16 @@ void loadingScreen(
     sf::Clock clk;
 
     float rot = 0.f;
-    float dur = 2.5f;
+    float dur = 20.0f;
+    float elapsed = 0.f;
 
     while (window.isOpen()) {
 
         float dt =
             clk.restart()
                 .asSeconds();
+
+        elapsed += dt;
 
         rot +=
             120.f * dt;
@@ -2807,10 +3308,7 @@ void loadingScreen(
 
         window.display();
 
-        if (
-            clk.getElapsedTime()
-                .asSeconds() + dt >= dur
-        )
+        if (elapsed >= dur)
             break;
     }
 }
@@ -2873,13 +3371,13 @@ bool loginScreen(
 
     float btnW =
         hasBtn
-            ? (float)btnTex.getSize().x
-            : 400;
+            ? (float)btnTex.getSize().x * 0.82f
+            : 330;
 
     float btnH =
         hasBtn
-            ? (float)btnTex.getSize().y
-            : 65;
+            ? (float)btnTex.getSize().y * 0.82f
+            : 52;
 
     float btnX =
         WIN_W / 2.f -
@@ -2888,15 +3386,21 @@ bool loginScreen(
     float btnY =
         WIN_H / 2.f + 30;
 
-    if (hasBtn)
+    if (hasBtn) {
+        btn.setScale({
+            0.82f,
+            0.82f
+        });
+
         btn.setPosition({
             btnX,
             btnY
         });
+    }
 
     sf::Text title(
         *fontTitle,
-        "Login",
+        "",
         48
     );
 
@@ -3078,14 +3582,18 @@ void progressScreen(
     sf::RenderWindow& w,
     sf::Font& fontTitle,
     sf::Font& fontText,
-    bool& downloading,
-    bool& extracting,
-    bool& completed,
+    std::atomic<bool>& downloading,
+    std::atomic<bool>& extracting,
+    std::atomic<bool>& completed,
     const std::string& title
 ) {
+    double lastDownloaded = 0.0;
+    double downloadSpeed = 0.0;
+    sf::Clock speedClock;
+
     while (
         w.isOpen() &&
-        !completed
+        !completed.load()
     ) {
 
         while (
@@ -3127,34 +3635,35 @@ void progressScreen(
 
         w.draw(t);
 
-        if (downloading) {
+        const bool isDownloading = downloading.load();
+        const bool isExtracting = extracting.load();
+
+        ProgressData snapshot;
+        {
+            std::lock_guard<std::mutex> lock(progressDataMutex);
+            snapshot.downloaded = progressData.downloaded;
+            snapshot.total = progressData.total;
+        }
+
+        if (isDownloading) {
 
             double pct =
-                progressData.total > 0
-                    ? progressData.downloaded /
-                        progressData.total *
+                snapshot.total > 0
+                    ? snapshot.downloaded /
+                        snapshot.total *
                         100
                     : 0;
+            pct = std::clamp(pct, 0.0, 100.0);
 
-            static double lastDl = 0;
-            static sf::Clock spCk;
-
-            double el =
-                spCk.getElapsedTime()
+            const double elapsed =
+                speedClock.getElapsedTime()
                     .asSeconds();
 
-            if (el >= 0.5f) {
-
-                progressData.speed =
-                    (
-                        progressData.downloaded -
-                        lastDl
-                    ) / el;
-
-                lastDl =
-                    progressData.downloaded;
-
-                spCk.restart();
+            if (elapsed >= 0.5) {
+                downloadSpeed =
+                    (snapshot.downloaded - lastDownloaded) / elapsed;
+                lastDownloaded = snapshot.downloaded;
+                speedClock.restart();
             }
 
             w.draw(
@@ -3225,11 +3734,11 @@ void progressScreen(
             sf::Text mb(
                 fontText,
                 fmtBytes(
-                    progressData.downloaded
+                    snapshot.downloaded
                 ) +
                 " - " +
                 fmtBytes(
-                    progressData.total
+                    snapshot.total
                 ),
                 18
             );
@@ -3253,7 +3762,7 @@ void progressScreen(
                 fontText,
                 "Speed: " +
                 fmtBytes(
-                    progressData.speed
+                    downloadSpeed
                 ) +
                 " per second",
                 18
@@ -3274,7 +3783,7 @@ void progressScreen(
 
             w.draw(sp);
 
-        } else if (extracting) {
+        } else if (isExtracting) {
 
             sf::Text st(
                 fontTitle,
@@ -3392,11 +3901,14 @@ void downloadVersion(
     sf::Font& fontText,
     const Version& ver
 ) {
-    progressData = {};
+    {
+        std::lock_guard<std::mutex> lock(progressDataMutex);
+        progressData = {};
+    }
 
-    bool downloading = true;
-    bool extracting = false;
-    bool completed = false;
+    std::atomic<bool> downloading = true;
+    std::atomic<bool> extracting = false;
+    std::atomic<bool> completed = false;
 
 #if defined(_WIN32)
 
@@ -3435,23 +3947,24 @@ void downloadVersion(
 #endif
 
     std::thread t([&]() {
+        try {
 
-        fs::create_directories(
-            TEMP_PATH_()
-        );
-
-        bool ok =
-            downloadToFile(
-                ver.zipUrl,
-                archivePath,
-                &progressData,
-                1024 * 1024
+            fs::create_directories(
+                TEMP_PATH_()
             );
 
-        downloading = false;
-        extracting = true;
+            bool ok =
+                downloadToFile(
+                    ver.zipUrl,
+                    archivePath,
+                    &progressData,
+                    1024 * 1024
+                );
 
-        if (ok) {
+            downloading.store(false);
+            extracting.store(true);
+
+            if (ok) {
 
 #if defined(_WIN32)
 
@@ -3513,10 +4026,29 @@ void downloadVersion(
             );
 
 #endif
-        }
+            }
 
-        extracting = false;
-        completed = true;
+            extracting.store(false);
+            completed.store(true);
+        } catch (const std::exception& error) {
+            std::cerr
+                << "[DOWNLOAD] Failed for version "
+                << ver.number
+                << ": "
+                << error.what()
+                << std::endl;
+            downloading.store(false);
+            extracting.store(false);
+            completed.store(true);
+        } catch (...) {
+            std::cerr
+                << "[DOWNLOAD] Unknown failure for version "
+                << ver.number
+                << std::endl;
+            downloading.store(false);
+            extracting.store(false);
+            completed.store(true);
+        }
     });
 
     progressScreen(
@@ -3765,6 +4297,8 @@ void modsScreen(
                         saveModsState(
                             mods
                         );
+
+                        reloadEnabledLuaMods();
                     }
                 }
             }
@@ -3835,7 +4369,7 @@ void modsScreen(
 
         sf::Text title(
             fontTitle,
-            "Mods",
+            "Game Versions - Launcher Mods",
             34
         );
 
@@ -4202,7 +4736,7 @@ void modsScreen(
 
             sf::Text empty(
                 fontText,
-                "No mods found. Drop mod folders into the mods folder.",
+                "No mods found. Drop launcher mod folders into the mods folder.",
                 16
             );
 
@@ -4856,6 +5390,199 @@ void optionsScreen(
 }
 
 
+static float drawMarkdownPanel(
+    sf::RenderWindow& window,
+    const sf::Font& fontTitle,
+    const sf::Font& fontText,
+    const std::string& title,
+    const std::string& content,
+    float x,
+    float y,
+    float width,
+    float height,
+    float scroll
+) {
+    sf::RectangleShape panel({width, height});
+    panel.setPosition({x, y});
+    panel.setFillColor(sf::Color(4, 7, 24, 95));
+    panel.setOutlineColor(sf::Color(125, 128, 145, 190));
+    panel.setOutlineThickness(5.f);
+    window.draw(panel);
+
+    sf::Text panelTitle(
+        fontTitle,
+        sf::String::fromUtf8(title.begin(), title.end()),
+        30
+    );
+    panelTitle.setFillColor(sf::Color::White);
+    panelTitle.setPosition({x + 24.f, y + 18.f});
+    window.draw(panelTitle);
+
+    float lineY = y + 82.f - scroll;
+    float contentHeight = 0.f;
+    bool inCodeBlock = false;
+    std::istringstream stream(content);
+    std::string line;
+
+    while (std::getline(stream, line)) {
+        if (line.rfind("```", 0) == 0) {
+            inCodeBlock = !inCodeBlock;
+            lineY += 8.f;
+            contentHeight += 8.f;
+            continue;
+        }
+
+        if (line.empty()) {
+            lineY += 12.f;
+            contentHeight += 12.f;
+            continue;
+        }
+
+        if (line == "---" || line == "***") {
+            sf::RectangleShape divider({width - 48.f, 1.f});
+            divider.setPosition({x + 24.f, lineY + 5.f});
+            divider.setFillColor(sf::Color(135, 138, 160, 170));
+
+            if (lineY > y + 70.f && lineY < y + height - 12.f)
+                window.draw(divider);
+
+            lineY += 18.f;
+            contentHeight += 18.f;
+            continue;
+        }
+
+        unsigned int headingLevel = 0;
+        while (
+            headingLevel < line.size() &&
+            headingLevel < 6 &&
+            line[headingLevel] == '#'
+        )
+            headingLevel++;
+
+        if (
+            headingLevel > 0 &&
+            headingLevel < line.size() &&
+            line[headingLevel] == ' '
+        )
+            line.erase(0, headingLevel + 1);
+        else
+            headingLevel = 0;
+
+        const bool bullet =
+            line.rfind("- ", 0) == 0 ||
+            line.rfind("* ", 0) == 0 ||
+            line.rfind("+ ", 0) == 0;
+        const bool quote = line.rfind("> ", 0) == 0;
+
+        if (bullet)
+            line = "- " + line.substr(2);
+        else if (quote)
+            line = "| " + line.substr(2);
+
+        for (size_t marker = line.find("**");
+             marker != std::string::npos;
+             marker = line.find("**"))
+            line.erase(marker, 2);
+
+        for (size_t marker = line.find('`');
+             marker != std::string::npos;
+             marker = line.find('`'))
+            line.erase(marker, 1);
+
+        if (line.rfind("![", 0) == 0) {
+            const size_t altEnd = line.find("](");
+            if (altEnd != std::string::npos)
+                line = "[Image: " + line.substr(2, altEnd - 2) + "]";
+        } else {
+            size_t linkStart = line.find('[');
+            while (linkStart != std::string::npos) {
+                const size_t labelEnd = line.find("](", linkStart);
+                const size_t linkEnd = labelEnd == std::string::npos
+                    ? std::string::npos
+                    : line.find(')', labelEnd + 2);
+
+                if (linkEnd == std::string::npos)
+                    break;
+
+                line.erase(labelEnd, linkEnd - labelEnd + 1);
+                line.erase(linkStart, 1);
+                linkStart = line.find('[', linkStart);
+            }
+        }
+
+        const unsigned int textSize = inCodeBlock
+            ? 15
+            : headingLevel == 1
+                ? 24
+                : headingLevel == 2
+                    ? 21
+                    : headingLevel > 0
+                        ? 19
+                        : 17;
+        const sf::Color textColor = inCodeBlock
+            ? sf::Color(170, 220, 190)
+            : quote
+                ? sf::Color(175, 180, 210)
+                : headingLevel > 0
+                    ? sf::Color(220, 215, 255)
+                    : sf::Color(235, 236, 245);
+
+        std::istringstream words(line);
+        std::string word;
+        std::string wrapped;
+        std::vector<std::string> wrappedLines;
+
+        while (words >> word) {
+            const std::string candidate = wrapped.empty()
+                ? word
+                : wrapped + " " + word;
+            sf::Text measure(
+                fontText,
+                sf::String::fromUtf8(candidate.begin(), candidate.end()),
+                textSize
+            );
+
+            if (
+                !wrapped.empty() &&
+                measure.getLocalBounds().size.x > width - 48.f
+            ) {
+                wrappedLines.push_back(wrapped);
+                wrapped = word;
+            } else {
+                wrapped = candidate;
+            }
+        }
+
+        if (!wrapped.empty())
+            wrappedLines.push_back(wrapped);
+
+        for (const auto& wrappedLine : wrappedLines) {
+            if (lineY > y + 66.f && lineY + textSize < y + height - 10.f) {
+                sf::Text text(
+                    fontText,
+                    sf::String::fromUtf8(wrappedLine.begin(), wrappedLine.end()),
+                    textSize
+                );
+                text.setFillColor(textColor);
+                text.setPosition({
+                    x + (bullet ? 34.f : quote ? 28.f : 24.f),
+                    lineY
+                });
+                window.draw(text);
+            }
+
+            lineY += textSize + 7.f;
+            contentHeight += textSize + 7.f;
+        }
+
+        lineY += headingLevel > 0 ? 5.f : 2.f;
+        contentHeight += headingLevel > 0 ? 5.f : 2.f;
+    }
+
+    return contentHeight;
+}
+
+
 void homeScreen(
     sf::RenderWindow& window,
     sf::Font& fontTitle,
@@ -4875,6 +5602,7 @@ void homeScreen(
 
     const float ICON_S = 110.f;
     const float OPT_S = 110.f;
+    const float FOLDER_S = 64.f;
 
     const float ICON_X =
         SB_W / 2.f -
@@ -4885,7 +5613,66 @@ void homeScreen(
     float iconY1 = 20.f;
     float iconY2 = 150.f;
     float iconY3 = 280.f;
-    float iconY4 = 410.f;
+    float iconY5 = 410.f;
+    float folderX = winW - FOLDER_S - 24.f;
+    float folderY = winH - FOLDER_S - 24.f;
+
+    std::vector<fs::path> newsMarkdownFiles;
+    std::error_code newsError;
+    for (fs::directory_iterator it(A_NEWS, newsError), end;
+         it != end && !newsError;
+         it.increment(newsError)) {
+        if (
+            it->is_regular_file() &&
+            it->path().extension() == ".md" &&
+            it->path().filename() != "changelog.md"
+        )
+            newsMarkdownFiles.push_back(it->path());
+    }
+
+    std::sort(
+        newsMarkdownFiles.begin(),
+        newsMarkdownFiles.end()
+    );
+
+    const std::string changelogMarkdown =
+        readTextFile(A_NEWS + "changelog.md");
+
+    std::string newsMarkdown;
+    for (const auto& path : newsMarkdownFiles) {
+        const std::string article = readTextFile(path.string());
+        if (article.empty())
+            continue;
+
+        std::string articleTitle = path.stem().string();
+        std::replace(articleTitle.begin(), articleTitle.end(), '_', ' ');
+        newsMarkdown += "## " + articleTitle + "\n\n";
+        newsMarkdown += article + "\n\n---\n\n";
+    }
+
+    if (newsMarkdown.empty())
+        newsMarkdown = "## News\n\nNenhuma notícia publicada ainda.";
+
+    const std::string displayedChangelog = changelogMarkdown.empty()
+        ? "## Changelog\n\nNenhum changelog encontrado."
+        : changelogMarkdown;
+
+    float feedScroll = 0.f;
+    float feedContentHeight = 0.f;
+    bool changelogToastVisible = false;
+    bool shakeNewsIcon = false;
+    sf::Clock changelogToastClock;
+    sf::Clock newsIconShakeClock;
+
+    const float feedX = SB_W + 24.f;
+    const float feedY = 22.f;
+    const float feedW = winW - feedX - 24.f;
+    const float feedBottom = winH - BT_H - 70.f;
+    const float panelGap = 28.f;
+    const float feedPanelW = (feedW - panelGap) / 2.f;
+    const float feedPanelH = feedBottom - feedY;
+    const float changelogPanelX = feedX;
+    const float newsPanelX = feedX + feedPanelW + panelGap;
 
     float AVT_S = 80.f;
 
@@ -4906,6 +5693,7 @@ void homeScreen(
     sf::Texture modTex;
     sf::Texture webTex;
     sf::Texture newsTex;
+    sf::Texture folderTex;
     sf::Texture optTex;
 
     sf::Texture avatarTex;
@@ -4916,14 +5704,14 @@ void homeScreen(
     bool hasBg =
         bgTex.loadFromFile(
             A_HOME +
-            "background.png"
+            "bg.png"
         );
 
     if (!hasBg)
         hasBg =
             bgTex.loadFromFile(
                 A_HOME +
-                "bg.png"
+                "background.png"
             );
 
     bool hasPlay =
@@ -4962,6 +5750,12 @@ void homeScreen(
             "newsIconB.png"
         );
 
+    bool hasFolder =
+        folderTex.loadFromFile(
+            A_HOME +
+            "folderIcon.png"
+        );
+
     bool hasOpt =
         optTex.loadFromFile(
             A_HOME +
@@ -4976,6 +5770,9 @@ void homeScreen(
 
     if (hasNews)
         newsTex.setSmooth(true);
+
+    if (hasFolder)
+        folderTex.setSmooth(true);
 
     if (hasOpt)
         optTex.setSmooth(true);
@@ -5044,6 +5841,7 @@ void homeScreen(
     sf::Sprite modSpr(modTex);
     sf::Sprite webSpr(webTex);
     sf::Sprite newsSpr(newsTex);
+    sf::Sprite folderSpr(folderTex);
     sf::Sprite optSpr(optTex);
 
     sf::Sprite avatarSpr(
@@ -5188,6 +5986,23 @@ void homeScreen(
         });
     }
 
+    const sf::Vector2f newsIconPosition =
+        newsSpr.getPosition();
+
+    if (hasFolder) {
+
+        scaleToSize(
+            folderSpr,
+            folderTex,
+            FOLDER_S
+        );
+
+        folderSpr.setPosition({
+            folderX,
+            folderY
+        });
+    }
+
     if (hasOpt) {
 
         scaleToSize(
@@ -5200,7 +6015,7 @@ void homeScreen(
             SB_W / 2.f -
                 optSpr.getGlobalBounds()
                     .size.x / 2.f,
-            iconY4
+            iconY5
         });
     }
 
@@ -5293,7 +6108,12 @@ void homeScreen(
                 m.y <= y + size;
         };
 
+    sf::Clock modFrameClock;
+
     while (window.isOpen()) {
+
+        const float modDeltaTime =
+            modFrameClock.restart().asSeconds();
 
         sf::Vector2f mouse(
             sf::Mouse::getPosition(
@@ -5319,9 +6139,15 @@ void homeScreen(
                 ICON_S
             );
 
+        bool hFolder =
+            mouse.x >= folderX &&
+            mouse.x <= folderX + FOLDER_S &&
+            mouse.y >= folderY &&
+            mouse.y <= folderY + FOLDER_S;
+
         bool hOpt =
             iconBounds(
-                iconY4,
+                iconY5,
                 OPT_S
             );
 
@@ -5353,6 +6179,23 @@ void homeScreen(
                 >()
             ) {
 
+                if (hWeb) {
+                    constexpr const char* websiteUrl =
+                        "https://the-moon-crew.github.io/Funkin-Moon-WebSite/";
+
+                    const auto result = ShellExecuteA(
+                        nullptr,
+                        "open",
+                        websiteUrl,
+                        nullptr,
+                        nullptr,
+                        SW_SHOWNORMAL
+                    );
+
+                    if (reinterpret_cast<std::intptr_t>(result) <= 32)
+                        std::cerr << "[WEB] Failed to open website\n";
+                }
+
                 if (hMod)
                     modsScreen(
                         window,
@@ -5361,11 +6204,63 @@ void homeScreen(
                     );
 
                 if (hNews)
-                    changelogScreen(
-                        window,
-                        fontTitle,
-                        fontText
-                    );
+                {
+                    changelogToastVisible = true;
+                    changelogToastClock.restart();
+                    shakeNewsIcon = true;
+                    newsIconShakeClock.restart();
+                }
+
+                if (hFolder) {
+#if defined(_WIN32)
+                    const fs::path folderPath = fs::absolute(
+                        fs::path(exeDir()) /
+                        "com.funkinmoon" /
+                        "versions"
+                    ).lexically_normal();
+
+                    fs::create_directories(folderPath);
+
+                    std::string commandLine =
+                        "explorer.exe \"" +
+                        folderPath.string() +
+                        "\"";
+
+                    STARTUPINFOA startupInfo{};
+                    startupInfo.cb = sizeof(startupInfo);
+                    PROCESS_INFORMATION processInfo{};
+
+                    std::cout
+                        << "[FOLDER] Opening versions: "
+                        << folderPath.string()
+                        << std::endl;
+
+                    if (CreateProcessA(
+                            nullptr,
+                            commandLine.data(),
+                            nullptr,
+                            nullptr,
+                            FALSE,
+                            0,
+                            nullptr,
+                            nullptr,
+                            &startupInfo,
+                            &processInfo
+                        )) {
+                        CloseHandle(processInfo.hThread);
+                        CloseHandle(processInfo.hProcess);
+                    } else {
+                        std::cerr
+                            << "[FOLDER] Explorer failed with error "
+                            << GetLastError()
+                            << std::endl;
+                    }
+#else
+                    const std::string folderPath = VERSIONS_PATH_();
+                    fs::create_directories(folderPath);
+                    system(("xdg-open \"" + folderPath + "\"").c_str());
+#endif
+                }
 
                 if (hOpt)
                     optionsScreen(
@@ -5418,6 +6313,22 @@ void homeScreen(
                         );
                 }
             }
+
+            if (
+                const auto* wheel =
+                    ev->getIf<sf::Event::MouseWheelScrolled>()
+            ) {
+                if (wheel->position.x >= feedX) {
+                    feedScroll = std::max(
+                        0.f,
+                        feedScroll - wheel->delta * 36.f
+                    );
+                    feedScroll = std::min(
+                        feedScroll,
+                        std::max(0.f, feedContentHeight - feedPanelH + 100.f)
+                    );
+                }
+            }
         }
 
         window.clear(
@@ -5430,6 +6341,13 @@ void homeScreen(
 
         if (hasBg)
             window.draw(bgSpr);
+
+        modRuntime.drawHomeEffects(
+            window,
+            {SB_W, 0.f},
+            {winW - SB_W, SB_H},
+            modDeltaTime
+        );
 
         if (hasLeft)
             window.draw(leftSpr);
@@ -5474,6 +6392,34 @@ void homeScreen(
                 blackBarsSpr
             );
 
+        const float changelogHeight = drawMarkdownPanel(
+            window,
+            fontTitle,
+            fontText,
+            "Changelog:",
+            displayedChangelog,
+            changelogPanelX,
+            feedY,
+            feedPanelW,
+            feedPanelH,
+            feedScroll
+        );
+
+        const float newsHeight = drawMarkdownPanel(
+            window,
+            fontTitle,
+            fontText,
+            "News:",
+            newsMarkdown,
+            newsPanelX,
+            feedY,
+            feedPanelW,
+            feedPanelH,
+            feedScroll
+        );
+
+        feedContentHeight = std::max(changelogHeight, newsHeight);
+
         auto drawIcon =
             [&](sf::Sprite& spr,
                 bool hov,
@@ -5507,10 +6453,36 @@ void homeScreen(
             hasWeb
         );
 
+        if (hasNews) {
+            const float shakeElapsed =
+                newsIconShakeClock.getElapsedTime().asSeconds();
+            float shakeOffset = 0.f;
+
+            if (shakeNewsIcon && shakeElapsed < 0.42f) {
+                shakeOffset =
+                    std::sin(shakeElapsed * 54.f) *
+                    5.f *
+                    (1.f - shakeElapsed / 0.42f);
+            } else {
+                shakeNewsIcon = false;
+            }
+
+            newsSpr.setPosition({
+                newsIconPosition.x + shakeOffset,
+                newsIconPosition.y
+            });
+            newsSpr.setColor(
+                hNews
+                    ? sf::Color(145, 145, 145)
+                    : sf::Color(178, 178, 178)
+            );
+            window.draw(newsSpr);
+        }
+
         drawIcon(
-            newsSpr,
-            hNews,
-            hasNews
+            folderSpr,
+            hFolder,
+            hasFolder
         );
 
         drawIcon(
@@ -5620,60 +6592,91 @@ void homeScreen(
             window.draw(pt);
         }
 
+        if (changelogToastVisible) {
+            const float toastElapsed =
+                changelogToastClock.getElapsedTime().asSeconds();
+
+            if (toastElapsed >= 2.f) {
+                changelogToastVisible = false;
+            } else {
+                const float fade = toastElapsed <= 1.5f
+                    ? 1.f
+                    : (2.f - toastElapsed) / 0.5f;
+                const auto alpha = static_cast<std::uint8_t>(255.f * fade);
+
+                sf::RectangleShape toast({390.f, 46.f});
+                toast.setPosition({
+                    feedX + (feedW - 390.f) / 2.f,
+                    feedBottom - 58.f
+                });
+                toast.setFillColor(sf::Color(12, 12, 22, alpha));
+                window.draw(toast);
+
+                sf::Text toastText(
+                    fontText,
+                    "Coming Soon",
+                    16
+                );
+                toastText.setFillColor(sf::Color(245, 245, 255, alpha));
+                toastText.setPosition({
+                    toast.getPosition().x + 18.f,
+                    toast.getPosition().y + 13.f
+                });
+                window.draw(toastText);
+            }
+        }
+
         window.display();
     }
 }
 
 
-int main() {
+int runLauncher() {
 
-    sf::RenderWindow window(
+      sf::RenderWindow window(
         sf::VideoMode({
-            WIN_W,
-            WIN_H
+            Project::WINDOW_WIDTH,
+            Project::WINDOW_HEIGHT
         }),
-        "Moon Launcher (Dev Build)",
-        sf::Style::Titlebar |
-        sf::Style::Close
+        Project::WINDOW_TITLE
     );
 
     window.setFramerateLimit(60);
 
-    sf::Image icon;
-
-    if (
-        icon.loadFromFile(
-            A_ICON
-        )
-    ) {
-
-        auto size =
-            icon.getSize();
-
-        window.setIcon(
-            size,
-            icon.getPixelsPtr()
-        );
-    }
+    Project::loadIcon(window);
+    startLauncherMusic();
 
     sf::Font fontTitle;
     sf::Font fontText;
     sf::Font fontMono;
+    sf::Font fontEmoji;
 
-    fontTitle.openFromFile(
-        A_FONTS +
-        "FunkinOptions.otf"
-    );
+    if (!fontTitle.openFromFile(
+            A_FONTS +
+            "FunkinOptions.otf"
+        )) {
+        std::cerr << "Could not load FunkinOptions.otf\n";
+        return 1;
+    }
 
-    fontText.openFromFile(
-        A_FONTS +
-        "FunkinLingLong.otf"
-    );
+    if (!fontText.openFromFile(
+            A_FONTS +
+            "VcrMono.ttf"
+        )) {
+        std::cerr << "Could not load VcrMono.ttf\n";
+        return 1;
+    }
 
-    fontMono.openFromFile(
-        A_FONTS +
-        "VcrMono.ttf"
-    );
+    if (!fontMono.openFromFile(
+            A_FONTS +
+            "VcrMono.ttf"
+        )) {
+        std::cerr << "Could not load VcrMono.ttf\n";
+        return 1;
+    }
+
+    bool hasEmojiFont =
+        loadEmojiFont(fontEmoji);
 
     fs::create_directories(
         VERSIONS_PATH_()
@@ -5705,6 +6708,15 @@ int main() {
         if (!window.isOpen())
             return 0;
 
+        if (!chooseDisplayNameScreen(
+                window,
+                fontTitle,
+                fontText,
+                fontMono,
+                hasEmojiFont ? &fontEmoji : nullptr
+            ))
+            return 0;
+
         loadingScreen(
             window,
             fontTitle
@@ -5715,11 +6727,15 @@ int main() {
         window.isOpen() &&
         loggedIn
     )
+    {
+        reloadEnabledLuaMods();
+
         homeScreen(
             window,
             fontTitle,
             fontText
         );
+    }
 
     return 0;
 }

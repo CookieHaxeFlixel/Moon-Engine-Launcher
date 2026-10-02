@@ -1,7 +1,12 @@
 [
   {
-    "version": "0.0.1",
+    "version": "v0.1.0",
     "installed": true,
-    "path": "com.funkinmoon/versions/v0.0.1"
+    "path": "com.funkinmoon/versions/vv0.1.0/funkin-moon-windows-64bit"
+  },
+  {
+    "version": "v0.0.1",
+    "installed": true,
+    "path": "com.funkinmoon/versions/vv0.0.1/funkin-moon-windows-64bit"
   }
 ]

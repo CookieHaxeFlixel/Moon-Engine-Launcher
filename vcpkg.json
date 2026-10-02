@@ -5,8 +5,9 @@
     {
       "name": "sfml",
       "default-features": false,
-      "features": ["graphics", "window"]
+      "features": ["graphics", "window", "audio"]
     },
-    "curl"
+    "curl",
+    "lua"
   ]
 }
