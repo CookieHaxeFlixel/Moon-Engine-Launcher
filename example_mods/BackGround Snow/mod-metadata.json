@@ -1,0 +1,13 @@
+{
+  "id": "aura_farm",
+  "name": "Aura Farm gogle",
+  "version": "1.0.0",
+  "author": "Cookie",
+  "launcher": {
+    "minVersion": "0.1.0"
+  },
+  "script": {
+    "language": "lua",
+    "entry": "src/mod-main.lua"
+  }
+}
