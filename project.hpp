@@ -18,7 +18,7 @@ namespace Project
         "Moon Launcher.exe";
 
     inline constexpr const char* VERSION =
-        "0.1.0";
+        "0.1.0.1";
 
     inline constexpr const char* DEVELOPER =
         "The Moon' Crew";

@@ -1,4 +1,6 @@
 [
   {"numero":"v0.0.1","zipUrl":"https://github.com/Brenninho123/Funkin-Moon/releases/download/v0.0.1/funkin-moon-windows-64bit.zip","estado":"pre_release","codigo":"v0.0.1"},
-  {"numero":"v0.1.0","zipUrl":"https://github.com/Brenninho123/Funkin-Moon/releases/download/v0.1.0/funkin-moon-windows-64bit.zip","estado":"final","codigo":"v0.1.0"}
+  {"numero":"v0.1.0","zipUrl":"https://github.com/Brenninho123/Funkin-Moon/releases/download/v0.1.0/funkin-moon-windows-64bit.zip","estado":"final","codigo":"v0.1.0"},
+  {"numero":"v0.1.1","zipUrl":"https://github.com/Brenninho123/Funkin-Moon/releases/download/v0.1.1/funkin-moon-windows-64bit.zip","estado":"final","codigo":"v0.1.1"}
 ]
+
