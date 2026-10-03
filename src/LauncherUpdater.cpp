@@ -1,25 +1,45 @@
+// ============================================================
+// LauncherUpdater.exe
+//
+// Started by Moon Launcher.exe with:
+//   LauncherUpdater.exe <launcherPid> <stagedBin> <installDir> <launcherExe>
+//
+// Waits for the launcher to close, copies the staged files over the
+// installation (keeping com.funkinmoon, mods and launcher-settings.json),
+// restarts the launcher and removes the temporary staging folder.
+// ============================================================
+
 #include <windows.h>
 
+#include "UpdateInstall.hpp"
+
 #include <filesystem>
-#include <fstream>
 #include <string>
 #include <system_error>
 
 namespace fs = std::filesystem;
 
-static void writeUpdaterLog(
-    const fs::path& installDirectory,
-    const std::string& message
-) {
-    std::ofstream log(installDirectory / "launcher-update.log", std::ios::app);
-    if (log)
-        log << message << '\n';
+// Removes the "MoonLauncherUpdate-*" temp folder that contains `stagedBin`.
+// Never deletes anything that is not inside such a folder.
+static void cleanupStaging(const fs::path& stagedBin)
+{
+    for (
+        fs::path current = stagedBin;
+        current.has_parent_path() && current != current.parent_path();
+        current = current.parent_path()
+    ) {
+        if (current.filename().wstring().rfind(L"MoonLauncherUpdate-", 0) == 0) {
+            std::error_code error;
+            fs::remove_all(current, error);
+            return;
+        }
+    }
 }
 
-int wmain(int argc, wchar_t* argv[]) {
-    if (argc != 5) {
+int wmain(int argc, wchar_t* argv[])
+{
+    if (argc != 5)
         return 2;
-    }
 
     const DWORD parentProcessId =
         static_cast<DWORD>(_wcstoui64(argv[1], nullptr, 10));
@@ -27,85 +47,28 @@ int wmain(int argc, wchar_t* argv[]) {
     const fs::path installDirectory(argv[3]);
     const fs::path launcherPath(argv[4]);
 
-    HANDLE parentProcess = OpenProcess(
-        SYNCHRONIZE,
-        FALSE,
-        parentProcessId
-    );
-
-    if (parentProcess) {
+    // Wait until the launcher has fully closed (its files are locked until then).
+    if (HANDLE parentProcess = OpenProcess(SYNCHRONIZE, FALSE, parentProcessId)) {
         WaitForSingleObject(parentProcess, INFINITE);
         CloseHandle(parentProcess);
     }
 
-    std::error_code error;
-    for (
-        fs::recursive_directory_iterator iterator(
-            stagedBin,
-            fs::directory_options::skip_permission_denied,
-            error
-        ),
-        end;
-        iterator != end && !error;
-        iterator.increment(error)
-    ) {
-        const fs::path relativePath =
-            iterator->path().lexically_relative(stagedBin);
+    int result = 0;
 
-        if (relativePath.empty())
-            continue;
-
-        const fs::path firstComponent = *relativePath.begin();
-        if (
-            firstComponent == L"com.funkinmoon" ||
-            firstComponent == L"mods"
-        ) {
-            if (iterator->is_directory(error))
-                iterator.disable_recursion_pending();
-            continue;
-        }
-
-        if (
-            !iterator->is_directory(error) &&
-            relativePath.filename() == L"launcher-settings.json"
-        )
-            continue;
-
-        const fs::path destination = installDirectory / relativePath;
-        if (iterator->is_directory(error)) {
-            fs::create_directories(destination, error);
-            if (error) {
-                writeUpdaterLog(installDirectory, "Failed creating: " + destination.string());
-                return 3;
-            }
-            continue;
-        }
-
-        fs::create_directories(destination.parent_path(), error);
-        if (!error) {
-            fs::copy_file(
-                iterator->path(),
-                destination,
-                fs::copy_options::overwrite_existing,
-                error
-            );
-        }
-
-        if (error) {
-            writeUpdaterLog(installDirectory, "Failed copying: " + destination.string());
-            return 4;
-        }
+    if (!fs::exists(stagedBin / launcherPath.filename())) {
+        UpdateInstall::writeLog(installDirectory, "Staged package has no launcher executable; update skipped.");
+        result = 8;
+    } else {
+        result = UpdateInstall::installStagedFiles(stagedBin, installDirectory);
     }
 
-    if (error) {
-        writeUpdaterLog(installDirectory, "Failed reading staged package: " + error.message());
-        return 5;
-    }
-
+    // Always try to start the launcher again (updated, or the old one if the update failed).
     if (!fs::exists(launcherPath)) {
-        writeUpdaterLog(installDirectory, "Updated launcher executable is missing.");
-        return 6;
+        UpdateInstall::writeLog(installDirectory, "Launcher executable is missing.");
+        return result != 0 ? result : 6;
     }
+
+    std::wstring commandLine = L"\"" + launcherPath.wstring() + L"\"";
 
     STARTUPINFOW startupInfo{};
     startupInfo.cb = sizeof(startupInfo);
@@ -113,7 +76,7 @@ int wmain(int argc, wchar_t* argv[]) {
 
     if (!CreateProcessW(
             launcherPath.c_str(),
-            nullptr,
+            commandLine.data(),
             nullptr,
             nullptr,
             FALSE,
@@ -123,12 +86,15 @@ int wmain(int argc, wchar_t* argv[]) {
             &startupInfo,
             &processInfo
         )) {
-        writeUpdaterLog(installDirectory, "Failed to restart launcher.");
-        return 7;
+        UpdateInstall::writeLog(installDirectory, "Failed to restart launcher.");
+        return result != 0 ? result : 7;
     }
 
     CloseHandle(processInfo.hThread);
     CloseHandle(processInfo.hProcess);
-    fs::remove_all(stagedBin.parent_path(), error);
-    return 0;
+
+    if (result == 0)
+        cleanupStaging(stagedBin);
+
+    return result;
 }

@@ -11,6 +11,7 @@ set "GCC=%MSYS_ROOT%\bin\gcc.exe"
 set "OUT=%ROOT%export\windows\release\bin"
 set "EXE_TMP=%OUT%\Moon Launcher.building.exe"
 set "ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
+if not exist "%ISCC%" set "ISCC=%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe"
 
 if not exist "%MSYS_ROOT%\include\lua.h" (
     echo [ERRO] Lua nao esta instalado no MSYS2 UCRT64.
@@ -20,6 +21,15 @@ if not exist "%MSYS_ROOT%\include\lua.h" (
 )
 
 cd /d "%ROOT%"
+
+set "APP_VERSION="
+for /f "delims=" %%V in ('python3 get_version.py') do set "APP_VERSION=%%V"
+if not defined APP_VERSION (
+    echo [ERRO] nao foi possivel ler Project::VERSION de project.hpp.
+    pause
+    exit /b 1
+)
+echo Versao: %APP_VERSION%
 
 "%MSYS_ROOT%\bin\python3.exe" "%ROOT%generate_app_icon.py"
 if errorlevel 1 (
@@ -75,7 +85,7 @@ echo.
 echo [2/3] Compilando Moon Launcher...
 echo.
 
-"%GXX%" -std=c++17 -municode ".\src\LauncherUpdater.cpp" -o "%OUT%\LauncherUpdater.exe"
+"%GXX%" -std=c++17 -municode -static ".\src\LauncherUpdater.cpp" -o "%OUT%\LauncherUpdater.exe"
 if errorlevel 1 goto ERROR
 
 "%GXX%" -std=c++17 ^
@@ -145,10 +155,28 @@ if exist "%ROOT%mods" (
     xcopy /E /I /Y "%ROOT%mods" "%OUT%\mods" >nul
 )
 
+echo.
+echo [4/5] Criando pacote de atualizacao (moon-launcher-v%APP_VERSION%.zip com bin\)...
+echo.
+
+set "PKG=%ROOT%export\windows\release\package"
+set "ZIP=%ROOT%export\windows\release\moon-launcher-v%APP_VERSION%.zip"
+
+if exist "%PKG%" rmdir /s /q "%PKG%"
+if exist "%ZIP%" del /f /q "%ZIP%"
+
+robocopy "%OUT%" "%PKG%\bin" /E /XD com.funkinmoon mods /XF launcher-update.log "Moon Launcher.building.exe" /NFL /NDL /NJH /NJS /NP >nul
+if errorlevel 8 goto ERROR
+
+"%SystemRoot%\System32\tar.exe" -a -c -f "%ZIP%" -C "%PKG%" bin
+if errorlevel 1 goto ERROR
+
+rmdir /s /q "%PKG%"
+
 if exist "%ISCC%" (
     echo.
-    echo [4/4] Criando instalador Setup...
-    "%ISCC%" ".\setup.iss"
+    echo [5/5] Criando instalador Setup...
+    "%ISCC%" /DMyAppVersion=%APP_VERSION% ".\setup.iss"
     if errorlevel 1 goto ERROR
 ) else (
     echo [AVISO] Inno Setup nao encontrado; Setup nao foi gerado.
@@ -163,6 +191,7 @@ echo          BUILD CONCLUIDA!
 echo ========================================
 echo.
 echo Executavel: "%OUT%\Moon Launcher.exe"
+echo Pacote de update: "%ZIP%"
 echo Pasta de runtime: "%OUT%"
 echo.
 pause

@@ -21,7 +21,7 @@ namespace Project
         "0.1.0";
 
     inline constexpr const char* DEVELOPER =
-        "The Moon Crew";
+        "The Moon' Crew";
 
     inline constexpr const char* GITHUB_REPOSITORY =
         "The-Moon-Crew/Moon-Engine-Launcher";

@@ -50,11 +50,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: MoonLauncher-windows
-          path: |
-            build/MoonLauncher.exe
-            build/*.dll
-            versions.json
-            assets/**
+          path: export/windows/release/bin/**
 
   build-android:
     runs-on: ubuntu-latest

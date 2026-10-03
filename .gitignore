@@ -15,3 +15,7 @@ android/app/build/
 android/app/.cxx/
 *.apk
 *.exe
+*.o
+*.res
+build-tests/
+launcher-update.log
